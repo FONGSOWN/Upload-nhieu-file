@@ -1,11 +1,16 @@
 import socket
+import sys
+import os
+
+# Thêm đường dẫn tới thư mục Shared
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../Shared')))
+
 import config
 import file_utils
 import protocol
-import os
 
 def start_server():
-    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+    file_utils.ensure_dir(config.UPLOAD_DIR)
     
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((config.HOST, config.PORT))
@@ -17,7 +22,6 @@ def start_server():
         print(f"\n[+] Ket noi moi tu: {addr}")
         
         try:
-            # Nhận số lượng file client muốn gửi
             raw_count = conn.recv(4)
             if raw_count:
                 file_count = int.from_bytes(raw_count, byteorder='big')
