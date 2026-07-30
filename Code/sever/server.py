@@ -3,7 +3,7 @@ import sys
 import os
 
 # Thêm đường dẫn tới thư mục Shared
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../Shared')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../shared')))
 
 import config
 import file_utils

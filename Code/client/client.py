@@ -3,7 +3,7 @@ import os
 import sys
 
 # Thêm đường dẫn tới thư mục Shared
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../Shared')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../shared')))
 
 import config
 import protocol
@@ -33,5 +33,5 @@ def start_client(file_list):
 
 if __name__ == '__main__':
     # File test (điền đường dẫn file m muốn gửi)
-    files_to_send = ['requirements.txt', 'README.md'] 
+    files_to_send = ['README.md', '.gitignore']
     start_client(files_to_send)
