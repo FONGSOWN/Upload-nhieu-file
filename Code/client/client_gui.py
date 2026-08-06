@@ -25,42 +25,85 @@ STATUS_UPLOADING = "Dang tai"
 STATUS_DONE = "Hoan tat"
 STATUS_ERROR = "Loi"
 
-STATUS_COLOR = {
-    STATUS_WAIT: "#555555",
-    STATUS_UPLOADING: "#1a73e8",
-    STATUS_DONE: "#188038",
-    STATUS_ERROR: "#d93025",
+# ---------------------------------------------------------------------------
+# Bang mau (flat design)
+# ---------------------------------------------------------------------------
+COL_BG = "#f3f4f8"          # nen tong the
+COL_CARD = "#ffffff"        # nen the/hang
+COL_CARD_ALT = "#fafbfe"    # zebra stripe
+COL_BORDER = "#e5e7eb"
+COL_PRIMARY = "#4f46e5"     # indigo
+COL_PRIMARY_DARK = "#4338ca"
+COL_TEXT = "#111827"
+COL_SUBTEXT = "#6b7280"
+
+STATUS_STYLE = {
+    STATUS_WAIT:      {"fg": "#4b5563", "bg": "#e5e7eb", "bar": "#9ca3af"},
+    STATUS_UPLOADING: {"fg": "#1d4ed8", "bg": "#dbeafe", "bar": "#3b82f6"},
+    STATUS_DONE:      {"fg": "#15803d", "bg": "#dcfce7", "bar": "#22c55e"},
+    STATUS_ERROR:     {"fg": "#b91c1c", "bg": "#fee2e2", "bar": "#ef4444"},
 }
 
 
-class FileRow:
-    """1 dong trong danh sach, ung voi 1 file: hien ten, progress bar,
-    trang thai va toc do/loi rieng cho tung file."""
+def format_size(n):
+    for unit in ["B", "KB", "MB", "GB"]:
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
-    def __init__(self, parent, filepath):
+
+class FileRow:
+    """1 the (card), ung voi 1 file: ten, kich thuoc, progress bar mau theo
+    trang thai, badge trang thai va toc do/ghi chu rieng cho tung file."""
+
+    def __init__(self, parent, filepath, index, style):
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
         self.status = STATUS_WAIT
+        self.style = style
 
-        self.frame = ttk.Frame(parent, padding=(6, 4))
-        self.frame.pack(fill='x', expand=True, pady=2)
-        self.frame.columnconfigure(0, weight=3, minsize=200)
-        self.frame.columnconfigure(1, weight=3, minsize=180)
-        self.frame.columnconfigure(2, weight=1, minsize=90)
-        self.frame.columnconfigure(3, weight=2, minsize=140)
+        bg = COL_CARD if index % 2 == 0 else COL_CARD_ALT
 
-        self.lbl_name = ttk.Label(self.frame, text=self.filename, anchor='w')
-        self.lbl_name.grid(row=0, column=0, sticky='ew', padx=(0, 6))
+        self.outer = tk.Frame(parent, bg=COL_BORDER)
+        self.outer.pack(fill='x', expand=True, pady=(0, 1))
+        self.frame = tk.Frame(self.outer, bg=bg, padx=14, pady=10)
+        self.frame.pack(fill='x', expand=True, padx=0, pady=(0, 1))
 
-        self.progress = ttk.Progressbar(self.frame, orient='horizontal', mode='determinate', maximum=100)
+        self.frame.columnconfigure(0, weight=3, minsize=220)
+        self.frame.columnconfigure(1, weight=3, minsize=170)
+        self.frame.columnconfigure(2, weight=1, minsize=100)
+        self.frame.columnconfigure(3, weight=2, minsize=130)
+
+        try:
+            size_txt = format_size(os.path.getsize(filepath))
+        except OSError:
+            size_txt = ""
+
+        name_box = tk.Frame(self.frame, bg=bg)
+        name_box.grid(row=0, column=0, sticky='w', padx=(0, 10))
+        tk.Label(name_box, text="\U0001F4C4  " + self.filename, bg=bg, fg=COL_TEXT,
+                 font=('Segoe UI', 10, 'bold'), anchor='w').pack(anchor='w')
+        tk.Label(name_box, text=size_txt, bg=bg, fg=COL_SUBTEXT,
+                 font=('Segoe UI', 8), anchor='w').pack(anchor='w')
+
+        bar_style_name = f"Row{index}.Horizontal.TProgressbar"
+        self.style.configure(bar_style_name, troughcolor="#e5e7eb", background=STATUS_STYLE[STATUS_WAIT]["bar"],
+                              bordercolor="#e5e7eb", lightcolor=STATUS_STYLE[STATUS_WAIT]["bar"],
+                              darkcolor=STATUS_STYLE[STATUS_WAIT]["bar"], thickness=10)
+        self.bar_style_name = bar_style_name
+        self.progress = ttk.Progressbar(self.frame, orient='horizontal', mode='determinate',
+                                         maximum=100, style=bar_style_name)
         self.progress.grid(row=0, column=1, sticky='ew', padx=6)
 
-        self.lbl_status = ttk.Label(self.frame, text=self.status, width=10, anchor='center',
-                                     foreground=STATUS_COLOR[self.status])
-        self.lbl_status.grid(row=0, column=2, padx=6)
+        self.badge = tk.Label(self.frame, text=self.status, font=('Segoe UI', 8, 'bold'),
+                               fg=STATUS_STYLE[self.status]["fg"], bg=STATUS_STYLE[self.status]["bg"],
+                               padx=10, pady=3)
+        self.badge.grid(row=0, column=2)
 
-        self.lbl_info = ttk.Label(self.frame, text='', anchor='w')
-        self.lbl_info.grid(row=0, column=3, sticky='ew', padx=(6, 0))
+        self.lbl_info = tk.Label(self.frame, text='', bg=bg, fg=COL_SUBTEXT,
+                                  font=('Segoe UI', 9), anchor='w')
+        self.lbl_info.grid(row=0, column=3, sticky='ew', padx=(10, 0))
 
     def set_progress(self, percent, info_text=None):
         self.progress['value'] = max(0, min(100, percent))
@@ -69,7 +112,10 @@ class FileRow:
 
     def set_status(self, status, info_text=None):
         self.status = status
-        self.lbl_status.config(text=status, foreground=STATUS_COLOR.get(status, "#000000"))
+        st = STATUS_STYLE.get(status, STATUS_STYLE[STATUS_WAIT])
+        self.badge.config(text=status, fg=st["fg"], bg=st["bg"])
+        self.style.configure(self.bar_style_name, background=st["bar"],
+                              lightcolor=st["bar"], darkcolor=st["bar"])
         if info_text is not None:
             self.lbl_info.config(text=info_text)
 
@@ -78,15 +124,23 @@ class UploadApp:
     def __init__(self, root):
         self.root = root
         self.root.title("UDM_10 - Upload nhieu file len Server")
-        self.root.geometry("820x540")
-        self.root.minsize(680, 400)
+        self.root.geometry("860x580")
+        self.root.minsize(700, 420)
+        self.root.configure(bg=COL_BG)
+
+        self.style = ttk.Style()
+        try:
+            self.style.theme_use('clam')
+        except tk.TclError:
+            pass
+        self.style.configure('TSpinbox', arrowsize=12)
 
         self.max_concurrent_var = tk.IntVar(value=config.MAX_CONCURRENT_UPLOADS)
         self.semaphore = threading.Semaphore(self.max_concurrent_var.get())
 
         self.gui_queue = queue.Queue()
         self.rows = {}          # filepath -> FileRow
-        self.uploaded_paths = set()
+        self.row_count = 0
 
         self._build_ui()
         self.root.after(100, self._poll_gui_queue)
@@ -94,62 +148,105 @@ class UploadApp:
     # ---------------- UI ----------------
 
     def _build_ui(self):
-        top = ttk.Frame(self.root, padding=10)
+        # ---- Thanh tieu de ----
+        header_bar = tk.Frame(self.root, bg=COL_PRIMARY, height=56)
+        header_bar.pack(fill='x')
+        header_bar.pack_propagate(False)
+        tk.Label(header_bar, text="\U0001F4E4  Upload nhieu file len Server",
+                 bg=COL_PRIMARY, fg="white", font=('Segoe UI', 14, 'bold')).pack(side='left', padx=16)
+        tk.Label(header_bar, text="UDM_10", bg=COL_PRIMARY, fg="#c7d2fe",
+                 font=('Segoe UI', 10)).pack(side='right', padx=16)
+
+        # ---- Thanh dieu khien ----
+        top = tk.Frame(self.root, bg=COL_BG, pady=10, padx=14)
         top.pack(fill='x')
 
-        ttk.Label(top, text=f"Server: {config.HOST}:{config.PORT}").pack(side='left')
+        server_pill = tk.Label(top, text=f"\U0001F5A5  {config.HOST}:{config.PORT}",
+                                bg="#eef2ff", fg=COL_PRIMARY_DARK, font=('Segoe UI', 9, 'bold'),
+                                padx=10, pady=4)
+        server_pill.pack(side='left')
 
-        ttk.Label(top, text="   So file tai dong thoi toi da:").pack(side='left')
-        spin = ttk.Spinbox(top, from_=1, to=10, width=4,
+        tk.Label(top, text="   Dong thoi toi da:", bg=COL_BG, fg=COL_SUBTEXT,
+                 font=('Segoe UI', 9)).pack(side='left')
+        spin = ttk.Spinbox(top, from_=1, to=10, width=3,
                             textvariable=self.max_concurrent_var,
                             command=self._on_concurrency_change)
-        spin.pack(side='left')
+        spin.pack(side='left', padx=(4, 0))
 
-        ttk.Button(top, text="Chon file...", command=self._choose_files).pack(side='right')
+        choose_btn = tk.Button(top, text="+ Chon file...", command=self._choose_files,
+                                bg=COL_PRIMARY, fg="white", activebackground=COL_PRIMARY_DARK,
+                                activeforeground="white", font=('Segoe UI', 9, 'bold'),
+                                relief='flat', padx=14, pady=6, bd=0, cursor='hand2')
+        choose_btn.pack(side='right')
 
-        drop_text = ("Keo & tha file vao day de upload"
-                     if DND_AVAILABLE else
-                     "(Chua cai tkinterdnd2 nen khong keo-tha duoc — dung nut 'Chon file...')")
-        self.drop_area = tk.Label(self.root, text=drop_text, relief='ridge', bd=2,
-                                   bg='#eef3ff', height=3, font=('Segoe UI', 11))
-        self.drop_area.pack(fill='x', padx=10, pady=(0, 8))
+        # ---- Khu vuc keo-tha ----
+        drop_wrap = tk.Frame(self.root, bg=COL_BG, padx=14)
+        drop_wrap.pack(fill='x')
 
         if DND_AVAILABLE:
-            self.drop_area.drop_target_register(DND_FILES)
-            self.drop_area.dnd_bind('<<Drop>>', self._on_drop)
+            drop_bg, drop_fg, drop_border = "#eef2ff", COL_PRIMARY_DARK, COL_PRIMARY
+            drop_text = "\u2B07  Keo & tha file vao day de upload"
+            drop_sub = "hoac bam nut 'Chon file...' phia tren"
+        else:
+            drop_bg, drop_fg, drop_border = "#fff7ed", "#c2410c", "#fdba74"
+            drop_text = "\u26A0  Chua cai tkinterdnd2 nen khong keo-tha duoc"
+            drop_sub = "chay: pip install tkinterdnd2  —  hoac dung nut 'Chon file...'"
 
-        header = ttk.Frame(self.root, padding=(12, 0))
-        header.pack(fill='x')
-        for text, w, col in [("Ten file", 3, 0), ("Tien trinh", 3, 1),
-                              ("Trang thai", 1, 2), ("Toc do / Ghi chu", 2, 3)]:
-            lbl = ttk.Label(header, text=text, font=('Segoe UI', 9, 'bold'))
-            lbl.grid(row=0, column=col, sticky='w')
-        header.columnconfigure(0, weight=3)
-        header.columnconfigure(1, weight=3)
-        header.columnconfigure(2, weight=1)
-        header.columnconfigure(3, weight=2)
+        drop_border_frame = tk.Frame(drop_wrap, bg=drop_border)
+        drop_border_frame.pack(fill='x', pady=(0, 10))
+        self.drop_area = tk.Label(drop_border_frame, bg=drop_bg, fg=drop_fg,
+                                   font=('Segoe UI', 12, 'bold'), pady=16,
+                                   text=drop_text)
+        self.drop_area.pack(fill='x', padx=2, pady=2)
+        self.drop_sub = tk.Label(drop_border_frame, bg=drop_bg, fg=COL_SUBTEXT,
+                                  font=('Segoe UI', 9), pady=0, text=drop_sub)
+        self.drop_sub.pack(fill='x', padx=2, pady=(0, 10))
 
-        container = ttk.Frame(self.root)
-        container.pack(fill='both', expand=True, padx=10, pady=5)
+        if DND_AVAILABLE:
+            for w in (self.drop_area, self.drop_sub, drop_border_frame):
+                w.drop_target_register(DND_FILES)
+                w.dnd_bind('<<Drop>>', self._on_drop)
 
-        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient='vertical', command=canvas.yview)
-        self.list_frame = ttk.Frame(canvas)
+        # ---- Header cot ----
+        col_header = tk.Frame(self.root, bg=COL_BG, padx=14)
+        col_header.pack(fill='x')
+        headers = [("TEN FILE", 3), ("TIEN TRINH", 3), ("TRANG THAI", 1), ("TOC DO / GHI CHU", 2)]
+        for i, (text, weight) in enumerate(headers):
+            tk.Label(col_header, text=text, bg=COL_BG, fg=COL_SUBTEXT,
+                     font=('Segoe UI', 8, 'bold')).grid(row=0, column=i, sticky='w',
+                                                          padx=(0 if i else 4, 10))
+            col_header.columnconfigure(i, weight=weight)
+
+        # ---- Danh sach file (scrollable) ----
+        container = tk.Frame(self.root, bg=COL_BG, padx=14, pady=6)
+        container.pack(fill='both', expand=True)
+
+        card = tk.Frame(container, bg=COL_BORDER)
+        card.pack(fill='both', expand=True)
+
+        canvas = tk.Canvas(card, borderwidth=0, highlightthickness=0, bg=COL_CARD)
+        scrollbar = ttk.Scrollbar(card, orient='vertical', command=canvas.yview)
+        self.list_frame = tk.Frame(canvas, bg=COL_CARD)
         self.list_frame.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.create_window((0, 0), window=self.list_frame, anchor='nw')
         canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side='left', fill='both', expand=True)
+        canvas.pack(side='left', fill='both', expand=True, padx=1, pady=1)
         scrollbar.pack(side='right', fill='y')
 
-        bottom = ttk.Frame(self.root, padding=10)
-        bottom.pack(fill='x')
-        self.lbl_summary = ttk.Label(bottom, text="San sang. Hay them file de upload.")
+        self.empty_label = tk.Label(self.list_frame, text="Chua co file nao. Hay them file de upload.",
+                                     bg=COL_CARD, fg=COL_SUBTEXT, font=('Segoe UI', 10), pady=30)
+        self.empty_label.pack(fill='x')
+
+        # ---- Thanh trang thai tong ----
+        bottom = tk.Frame(self.root, bg="#eef0f5", padx=14, pady=8)
+        bottom.pack(fill='x', side='bottom')
+        self.lbl_summary = tk.Label(bottom, text="San sang.", bg="#eef0f5", fg=COL_TEXT,
+                                     font=('Segoe UI', 9))
         self.lbl_summary.pack(side='left')
 
     # ---------------- Su kien ----------------
 
     def _on_concurrency_change(self):
-        # Ap dung gioi han moi cho cac luot upload tiep theo (semaphore moi).
         new_val = max(1, self.max_concurrent_var.get())
         self.semaphore = threading.Semaphore(new_val)
 
@@ -168,16 +265,19 @@ class UploadApp:
             if not os.path.isfile(p):
                 continue
             if p in self.rows:
-                continue  # da co trong danh sach (dang cho/dang tai/da xong)
-            row = FileRow(self.list_frame, p)
+                continue
+            if self.row_count == 0:
+                self.empty_label.pack_forget()
+            row = FileRow(self.list_frame, p, self.row_count, self.style)
             self.rows[p] = row
+            self.row_count += 1
             added += 1
             t = threading.Thread(target=self._upload_worker, args=(p, row), daemon=True)
             t.start()
         if added:
             self._update_summary()
 
-    # ---------------- Luong upload (chay tren thread rieng, khong duoc dung Tk truc tiep) ----------------
+    # ---------------- Luong upload (thread rieng, khong dung Tk truc tiep) ----------------
 
     def _upload_worker(self, filepath, row):
         sem = self.semaphore
@@ -215,7 +315,6 @@ class UploadApp:
                 self.gui_queue.put(('status', row, STATUS_ERROR, message))
 
         except Exception as e:
-            # Loi cua file nay khong anh huong toi cac file khac (thread + socket rieng).
             self.gui_queue.put(('status', row, STATUS_ERROR, str(e)))
         finally:
             if sock:
@@ -249,8 +348,8 @@ class UploadApp:
         uploading = sum(1 for r in self.rows.values() if r.status == STATUS_UPLOADING)
         waiting = total - done - error - uploading
         self.lbl_summary.config(
-            text=f"Tong: {total} | Cho: {waiting} | Dang tai: {uploading} | "
-                 f"Hoan tat: {done} | Loi: {error}"
+            text=(f"Tong: {total}   \u2022   Cho: {waiting}   \u2022   Dang tai: {uploading}   "
+                  f"\u2022   Hoan tat: {done}   \u2022   Loi: {error}")
         )
 
 
