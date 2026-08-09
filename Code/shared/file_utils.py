@@ -6,3 +6,11 @@ def ensure_dir(path):
 
 def get_file_size(filepath):
     return os.path.getsize(filepath) if os.path.exists(filepath) else 0
+def get_unique_filename(save_dir, filename):
+    base, ext = os.path.splitext(filename)
+    candidate = filename
+    counter = 1
+    while os.path.exists(os.path.join(save_dir, candidate)):
+        candidate = f"{base} ({counter}){ext}"
+        counter += 1
+    return candidate
