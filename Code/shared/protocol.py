@@ -55,14 +55,16 @@ def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
                 progress_callback(bytes_sent, file_size)
 
     return file_size
-MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
+
+
+MAX_FILENAME_LEN = 1024
 
 def recv_file_header(sock):
     """Nhan header, tra ve (filename, file_size)."""
     raw_len = recv_exact(sock, 2)
     fn_len = struct.unpack('!H', raw_len)[0]
-    if fn_len == 0 or fn_len  > MAX_FILENAME_LEN:
-        raise ValueError(f"Do dai ten file khong hop le: {fn_len}")
+    if fn_len == 0 or fn_len > MAX_FILENAME_LEN:
+        raise ValueError(f"do dai ten file khong hop le: {fn_len}")
     filename = recv_exact(sock, fn_len).decode('utf-8')
     file_size = struct.unpack('!Q', recv_exact(sock, 8))[0]
     return filename, file_size
