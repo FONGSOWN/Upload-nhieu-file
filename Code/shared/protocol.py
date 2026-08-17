@@ -16,7 +16,7 @@ Luong du lieu tren day:
        neu trung voi file co san).
      - Neu ERROR: message la mo ta loi.
 """
-
+MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
 
 def recv_exact(sock, n):
     """Nhan chinh xac n byte tu socket, nem loi neu ket noi bi ngat giua chung."""
@@ -38,6 +38,12 @@ def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
     """
     filename = os.path.basename(filepath)
     filename_bytes = filename.encode('utf-8')
+    #kiem tra độ dài của file
+    if len(filename_bytes) == 0:
+        raise ValueError("ten file khong hop le!")
+    if len(filename_bytes) > MAX_FILENAME_LEN:
+        raise ValueError(f"ten file qua dai: {len(filename_bytes)}bytes")
+    
     file_size = os.path.getsize(filepath)
 
     header = struct.pack(f'!H{len(filename_bytes)}sQ', len(filename_bytes), filename_bytes, file_size)
@@ -57,19 +63,23 @@ def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
     return file_size
 
 
-MAX_FILENAME_LEN = 1024
-
+# nhận phần header
 def recv_file_header(sock):
     """Nhan header, tra ve (filename, file_size)."""
     raw_len = recv_exact(sock, 2)
     fn_len = struct.unpack('!H', raw_len)[0]
     if fn_len == 0 or fn_len > MAX_FILENAME_LEN:
         raise ValueError(f"do dai ten file khong hop le: {fn_len}")
-    filename = recv_exact(sock, fn_len).decode('utf-8')
-    file_size = struct.unpack('!Q', recv_exact(sock, 8))[0]
+    filename_bytes = recv_exact(sock, fn_len)
+    try:
+        filename = filename_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError("ten file khong phai  UTF-8 hop le")
+    raw_size = recv_exact(sock, 8)
+    file_size = struct.unpack('!Q', raw_size)[0]
     return filename, file_size
 
-
+# nhận phần data
 def recv_file_data(sock, save_path, file_size, buffer_size=4096, progress_callback=None):
     """
     Nhan du lieu file va ghi vao save_path.
