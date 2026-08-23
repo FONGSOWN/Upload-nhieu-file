@@ -4,6 +4,7 @@ import socket
 import threading
 import queue
 import time
+import logging
 
 # Them duong dan toi thu muc shared
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../shared')))
@@ -279,51 +280,153 @@ class UploadApp:
 
     # ---------------- Luong upload (thread rieng, khong dung Tk truc tiep) ----------------
 
-    def _upload_worker(self, filepath, row):
-        sem = self.semaphore
-        sem.acquire()
-        sock = None
-        try:
-            self.gui_queue.put(('status', row, STATUS_UPLOADING, "Dang ket noi..."))
+def _upload_worker(self, filepath, row):
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(15)
-            sock.connect((config.HOST, config.PORT))
-            sock.settimeout(None)
+    sem = self.semaphore
 
-            last_time = [time.time()]
-            last_bytes = [0]
+    sem.acquire()
 
-            def progress_cb(sent, total):
-                now = time.time()
-                elapsed = now - last_time[0]
-                if elapsed >= 0.2 or sent >= total:
-                    speed_kb = ((sent - last_bytes[0]) / 1024 / elapsed) if elapsed > 0 else 0
-                    percent = (sent / total * 100) if total else 100
-                    last_time[0] = now
-                    last_bytes[0] = sent
-                    self.gui_queue.put(('progress', row, percent, f"{speed_kb:.1f} KB/s"))
+    sock = None
+    start_time = time.time()
 
-            protocol.send_file(sock, filepath, config.BUFFER_SIZE, progress_cb)
-            ok, message = protocol.recv_response(sock)
+    #ghi log khi bắt đầu upload
+    logging.info(
+        "Bat dau upload: " + os.path.basename(filepath)
+    )
 
-            if ok:
-                self.gui_queue.put(('progress', row, 100, ''))
-                note = f"Da luu: {message}" if message != row.filename else "Thanh cong"
-                self.gui_queue.put(('status', row, STATUS_DONE, note))
-            else:
-                self.gui_queue.put(('status', row, STATUS_ERROR, message))
+    try:
+        self.gui_queue.put(
+            ('status', row, STATUS_UPLOADING, "Dang ket noi...")
+        )
 
-        except Exception as e:
-            self.gui_queue.put(('status', row, STATUS_ERROR, str(e)))
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-            sem.release()
-            self.gui_queue.put(('summary', None, None, None))
+        sock = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM
+        )
+
+        sock.settimeout(15)
+
+        sock.connect(
+            (config.HOST, config.PORT)
+        )
+
+        sock.settimeout(None)
+
+        last_time = [time.time()]
+        last_bytes = [0]
+
+        #cập nhật tiến trình upload
+        def progress_cb(sent, total):
+            now = time.time()
+
+            elapsed = now - last_time[0]
+
+            if elapsed >= 0.2 or sent >= total:
+
+                # Tính tốc độ KB/s
+                if elapsed > 0:
+                    speed_kb = (
+                        (sent - last_bytes[0])
+                        / 1024
+                        / elapsed
+                    )
+                else:
+                    speed_kb = 0
+
+                # Tính phần trăm
+                if total > 0:
+                    percent = sent / total * 100
+                else:
+                    percent = 100
+
+                # Tính thời gian upload
+                total_time = now - start_time
+
+                info = (
+                    f"{speed_kb:.1f} KB/s | "
+                    f"{total_time:.1f}s"
+                )
+
+                last_time[0] = now
+                last_bytes[0] = sent
+
+                self.gui_queue.put(
+                    ('progress', row, percent, info)
+                )
+
+        # Gửi file
+        protocol.send_file(
+            sock,
+            filepath,
+            config.BUFFER_SIZE,
+            progress_cb
+        )
+
+        # Nhận kết quả từ Server
+        ok, message = protocol.recv_response(sock)
+
+        if ok:
+            self.gui_queue.put(
+                ('progress', row, 100, '')
+            )
+
+            total_time = time.time() - start_time
+
+            note = (
+                f"Da luu: {message}"
+                if message != row.filename
+                else "Thanh cong"
+            )
+
+            self.gui_queue.put(
+                ('status', row, STATUS_DONE, note)
+            )
+
+            #ghi log thành công
+            logging.info(
+                "Upload thanh cong: "
+                + os.path.basename(filepath)
+                + f" - {total_time:.2f}s"
+            )
+
+        else:
+            self.gui_queue.put(
+                ('status', row, STATUS_ERROR, message)
+            )
+
+            #ghi log thất bại
+            logging.error(
+                "Upload that bai: "
+                + os.path.basename(filepath)
+                + " - "
+                + str(message)
+            )
+
+    except Exception as e:
+        self.gui_queue.put(
+            ('status', row, STATUS_ERROR, str(e))
+        )
+
+        #ghi log lỗi
+        logging.error(
+            "Loi upload: "
+            + os.path.basename(filepath)
+            + " - "
+            + str(e)
+        )
+
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        sem.release()
+
+        self.gui_queue.put(
+            ('summary', None, None, None)
+        )
 
     # ---------------- Cap nhat GUI an toan tu main thread ----------------
 
