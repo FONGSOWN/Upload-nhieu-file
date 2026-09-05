@@ -36,6 +36,8 @@ def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
     Gui header + du lieu file qua socket.
     progress_callback(bytes_sent, total_bytes) duoc goi sau moi chunk (neu co).
     """
+    if buffer_size <=0:
+        raise ValueError("buffer_size phải lớn hơn 0")
     filename = os.path.basename(filepath)
     filename_bytes = filename.encode('utf-8')
     #kiem tra độ dài của file
