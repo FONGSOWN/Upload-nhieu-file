@@ -105,6 +105,8 @@ def recv_file_data(sock, save_path, file_size, buffer_size=4096, progress_callba
 
 def send_response(sock, ok, message):
     msg_bytes = message.encode('utf-8')
+    if len(msg_bytes) > 65535:
+        raise ValueError("message phan hoi qua dai")
     status = 1 if ok else 0
     payload = struct.pack(f'!B H{len(msg_bytes)}s', status, len(msg_bytes), msg_bytes)
     sock.sendall(payload)
