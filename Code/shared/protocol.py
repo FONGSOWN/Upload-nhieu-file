@@ -114,6 +114,9 @@ def send_response(sock, ok, message):
 
 def recv_response(sock):
     status_byte = recv_exact(sock, 1)[0]
+    if status_byte not in (0,1):
+        raise ValueError(f"status phản hồi không hợp lệ: {status_byte}")
+
     msg_len = struct.unpack('!H', recv_exact(sock, 2))[0]
     message = recv_exact(sock, msg_len).decode('utf-8') if msg_len else ''
     return (status_byte == 1), message
