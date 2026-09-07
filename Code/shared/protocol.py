@@ -132,6 +132,8 @@ def recv_response(sock):
 # ---------- Giu lai ham cu (tuong thich nguoc, khong dung trong ban GUI) ----------
 
 def recv_file(sock, save_dir, buffer_size=4096):
+    if buffer_size <= 0:
+        raise ValueError ("buffer_size phai lon hon 0")
     filename, file_size = recv_file_header(sock)
     save_path = os.path.join(save_dir, filename)
     recv_file_data(sock, save_path, file_size, buffer_size)
