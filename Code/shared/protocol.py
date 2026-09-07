@@ -97,6 +97,8 @@ def recv_file_data(sock, save_path, file_size, buffer_size=4096, progress_callba
             f.write(chunk)
             bytes_received += len(chunk)
             if progress_callback:
+                if not callable(progress_callback):
+                    raise TypeError("progress_callback phai la ham goi duoc")
                 progress_callback(bytes_received, file_size)
     return bytes_received
 
