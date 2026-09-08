@@ -9,7 +9,7 @@ import config
 import protocol
 
 def start_client(file_list):
-    valid_files = [f for f in file_list if os.path.exists(f)]
+    valid_files = [f for f in file_list if os.path.isfile(f)]
     if not valid_files:
         print("[-] Khong co file hop le de gui!")
         return
