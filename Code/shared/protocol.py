@@ -1,6 +1,8 @@
 import struct
 import os
 
+MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
+
 """
 Moi ket noi = 1 lan upload 1 file (client_gui.py mo 1 socket rieng cho moi file
 de co the upload dong thoi nhieu file, moi file co trang thai/tien trinh rieng,
@@ -63,7 +65,7 @@ def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
                 progress_callback(bytes_sent, file_size)
 
     return file_size
-MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
+
 
 # nhận phần header
 def recv_file_header(sock):
