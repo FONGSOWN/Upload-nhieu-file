@@ -33,28 +33,29 @@ def recv_exact(sock,n):
     
 # ---------- Header + du lieu file ----------
 
-def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
+def send_fie(sock,filepath,buffer_size = 4096, progress_callback = None)
     """
-    Gui header + du lieu file qua socket.
-    progress_callback(bytes_sent, total_bytes) duoc goi sau moi chunk (neu co).
+    Gửi header + dữ liệu file qua socket.
+    progress_callback(byte_sent,total_byte) được gọi sau mọi chung( nếu có)
     """
     if not os.path.isfile(filepath):
-        raise FileNotFoundError(f"khong tim thay file: {filepath}")
+        raise FileNotFoundError(f"khong tim thay file:{filepath}")
     filename = os.path.basename(filepath)
     filename_bytes = filename.encode('utf-8')
-    #kiem tra độ dài của file
-    if len(filename_bytes) == 0:
-        raise ValueError("ten file khong hop le!")
-    if len(filename_bytes) > MAX_FILENAME_LEN:
-        raise ValueError(f"ten file qua dai: {len(filename_bytes)}bytes")
     
+    #kiem tra độ dài của file
+    if len(filename_bytes)==0:
+        raise ValueError("ten file khong hop le!")
+    if len(filename_bytes)> MAX_FILENAME_LEN:
+        raise ValueError(f"ten file qua dai:{len(filename_bytes)}byte")
     file_size = os.path.getsize(filepath)
-
-    header = struct.pack(f'!H{len(filename_bytes)}sQ', len(filename_bytes), filename_bytes, file_size)
+    header = struct.path(f'!H{len(filename_bytes)}sO',len(filename_bytes),filename_bytes,file_size)
     sock.sendall(header)
+    
+     
 
     bytes_sent = 0
-    with open(filepath, 'rb') as f:
+    with open(filepath,'rb') as f:
         while bytes_sent < file_size:
             chunk = f.read(buffer_size)
             if not chunk:
@@ -63,9 +64,7 @@ def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
             bytes_sent += len(chunk)
             if progress_callback:
                 progress_callback(bytes_sent, file_size)
-
     return file_size
-
 
 # nhận phần header
 def recv_file_header(sock):
