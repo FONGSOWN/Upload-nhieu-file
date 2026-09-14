@@ -20,17 +20,17 @@ Luong du lieu tren day:
 """
 MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
 
-def recv_exact(sock, n):
-    """Nhan chinh xac n byte tu socket, nem loi neu ket noi bi ngat giua chung."""
-    data = b''
-    while len(data) < n:
+def recv_exact(sock,n):
+    """Nhận chính xác n byte từ socket,ném loi nếu kết nối bị ngắt giữa chừng"""
+    data= b''
+    while len(data)<n:
         packet = sock.recv(n - len(data))
         if not packet:
-            raise ConnectionError("Ket noi bi ngat khi dang nhan du lieu")
+            raise ConnectionError("kết nối bị ngắt khi đang nhận dữ liệu")
         data += packet
     return data
 
-
+    
 # ---------- Header + du lieu file ----------
 
 def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
