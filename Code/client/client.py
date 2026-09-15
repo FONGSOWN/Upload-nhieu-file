@@ -1,37 +1,64 @@
-import socket
 import os
-import sys
-
-# Thêm đường dẫn tới thư mục Shared
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../shared')))
-
+import socket
 import config
-import protocol
+from shared import protocol
+
+def validate_files(file_list):
+    """Kiểm tra sự tồn tại và tính hợp lệ của danh sách file."""
+    valid_files = []
+    if not file_list:
+        print("[-] Danh sách file trống!")
+        return valid_files
+
+    for filepath in file_list:
+        if not os.path.exists(filepath):
+            print(f"[-] File không tồn tại: {filepath}")
+        elif not os.path.isfile(filepath):
+            print(f"[-] Đường dẫn không phải là file: {filepath}")
+        elif os.path.getsize(filepath) == 0:
+            print(f"[-] File rỗng (0 bytes): {filepath}")
+        else:
+            valid_files.append(filepath)
+
+    return valid_files
 
 def start_client(file_list):
-    valid_files = [f for f in file_list if os.path.isfile(f)]
+    """Hàm quản lý kết nối Socket và xử lý gửi chuỗi file."""
+    valid_files = validate_files(file_list)
     if not valid_files:
-        print("[-] Khong co file hop le de gui!")
+        print("[-] Không có file hợp lệ nào để gửi!")
         return
 
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
     try:
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(10.0)
+
+        print(f"[*] Đang kết nối tới Server {config.HOST}:{config.PORT}...")
         client.connect((config.HOST, config.PORT))
-        print(f"[+] Da ket noi toi Server {config.HOST}:{config.PORT}")
+        print("[+] Kết nối Server thành công!\n")
 
-        client.sendall(len(valid_files).to_bytes(4, byteorder='big'))
-
-        for filepath in valid_files:
-            print(f"[*] Dang gui: {filepath}...")
+        for index, filepath in enumerate(valid_files, start=1):
+            print(f"[{index}/{len(valid_files)}] Đang gửi: {os.path.basename(filepath)}...")
             protocol.send_file(client, filepath, config.BUFFER_SIZE)
 
-        print("[+] Upload hoan tat tat ca file!")
-    except Exception as e:
-        print(f"[-] Loi: {e}")
-    finally:
-        client.close()
+            ack = client.recv(1024).decode('utf-8', errors='ignore').strip()
+            if ack == "ACK" or "OK" in ack:
+                print(f"[+] Server đã nhận thành công: {os.path.basename(filepath)}")
+            else:
+                print(f"[?] Server phản hồi: {ack}")
 
-if __name__ == '__main__':
-    # File test (điền đường dẫn file m muốn gửi)
-    files_to_send = ['README.md', '.gitignore']
-    start_client(files_to_send)
+        print("\n[+] ===========================================")
+        print("[+] Upload hoàn tất tất cả file thành công!")
+        print("[+] ===========================================")
+
+    except socket.timeout:
+        print("[-] Lỗi: Quá thời gian chờ (Timeout) từ Server!")
+    except ConnectionRefusedError:
+        print("[-] Lỗi: Không thể kết nối! Hãy chắc chắn Server đang chạy.")
+    except Exception as e:
+        print(f"[-] Có lỗi xảy ra trong quá trình truyền file: {e}")
+    finally:
+        if client:
+            client.close()
+            print("[*] Đã đóng kết nối Socket an toàn.")
