@@ -1,7 +1,7 @@
-import struct
 import os
+import struct
 
-MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
+MAX_FILENAME_LEN = 1024  # chan header bat thuong / du lieu rac
 
 """
 Moi ket noi = 1 lan upload 1 file (client_gui.py mo 1 socket rieng cho moi file
@@ -18,44 +18,44 @@ Luong du lieu tren day:
        neu trung voi file co san).
      - Neu ERROR: message la mo ta loi.
 """
-MAX_FILENAME_LEN = 1024 # chặn header bất thường/ dữ liệu rác.
 
-def recv_exact(sock,n):
-    """Nhận chính xác n byte từ socket,ném loi nếu kết nối bị ngắt giữa chừng"""
-    data= b''
-    while len(data)<n:
+def recv_exact(sock, n):
+    """Nhan chinh xac n byte tu socket, nem loi neu ket noi bi ngat giua chung."""
+    data = b''
+    while len(data) < n:
         packet = sock.recv(n - len(data))
         if not packet:
-            raise ConnectionError("kết nối bị ngắt khi đang nhận dữ liệu")
+            raise ConnectionError("Ket noi bi ngat khi dang nhan du lieu")
         data += packet
     return data
 
-    
+
 # ---------- Header + du lieu file ----------
 
-def send_fie(sock,filepath,buffer_size = 4096, progress_callback = None)
+def send_file(sock, filepath, buffer_size=4096, progress_callback=None):
     """
-    Gửi header + dữ liệu file qua socket.
-    progress_callback(byte_sent,total_byte) được gọi sau mọi chung( nếu có)
+    Gui header + du lieu file qua socket.
+    progress_callback(bytes_sent, total_bytes) duoc goi sau moi chunk (neu co).
     """
     if not os.path.isfile(filepath):
-        raise FileNotFoundError(f"khong tim thay file:{filepath}")
+        raise FileNotFoundError(f"Khong tim thay file: {filepath}")
+
     filename = os.path.basename(filepath)
     filename_bytes = filename.encode('utf-8')
-    
-    #kiem tra độ dài của file
-    if len(filename_bytes)==0:
-        raise ValueError("ten file khong hop le!")
-    if len(filename_bytes)> MAX_FILENAME_LEN:
-        raise ValueError(f"ten file qua dai:{len(filename_bytes)}byte")
+
+    if len(filename_bytes) == 0:
+        raise ValueError("Ten file khong hop le!")
+    if len(filename_bytes) > MAX_FILENAME_LEN:
+        raise ValueError(f"Ten file qua dai: {len(filename_bytes)} byte")
+
     file_size = os.path.getsize(filepath)
-    header = struct.path(f'!H{len(filename_bytes)}sO',len(filename_bytes),filename_bytes,file_size)
+
+    # Dinh dang: !H (2 bytes do dai ten) + Ns (chuoi ten file) + Q (8 bytes unsigned long long kich thuoc file)
+    header = struct.pack(f'!H{len(filename_bytes)}sQ', len(filename_bytes), filename_bytes, file_size)
     sock.sendall(header)
-    
-     
 
     bytes_sent = 0
-    with open(filepath,'rb') as f:
+    with open(filepath, 'rb') as f:
         while bytes_sent < file_size:
             chunk = f.read(buffer_size)
             if not chunk:
@@ -64,25 +64,28 @@ def send_fie(sock,filepath,buffer_size = 4096, progress_callback = None)
             bytes_sent += len(chunk)
             if progress_callback:
                 progress_callback(bytes_sent, file_size)
+
     return file_size
 
-# nhận phần header
+
 def recv_file_header(sock):
     """Nhan header, tra ve (filename, file_size)."""
     raw_len = recv_exact(sock, 2)
     fn_len = struct.unpack('!H', raw_len)[0]
     if fn_len == 0 or fn_len > MAX_FILENAME_LEN:
-        raise ValueError(f"do dai ten file khong hop le: {fn_len}")
+        raise ValueError(f"Do dai ten file khong hop le: {fn_len}")
+
     filename_bytes = recv_exact(sock, fn_len)
     try:
         filename = filename_bytes.decode('utf-8')
     except UnicodeDecodeError:
-        raise ValueError("ten file khong phai  UTF-8 hop le")
+        raise ValueError("Ten file khong phai UTF-8 hop le")
+
     raw_size = recv_exact(sock, 8)
     file_size = struct.unpack('!Q', raw_size)[0]
     return filename, file_size
 
-# nhận phần data
+
 def recv_file_data(sock, save_path, file_size, buffer_size=4096, progress_callback=None):
     """
     Nhan du lieu file va ghi vao save_path.
@@ -101,6 +104,7 @@ def recv_file_data(sock, save_path, file_size, buffer_size=4096, progress_callba
                 if not callable(progress_callback):
                     raise TypeError("progress_callback phai la ham goi duoc")
                 progress_callback(bytes_received, file_size)
+
     return bytes_received
 
 
@@ -109,37 +113,35 @@ def recv_file_data(sock, save_path, file_size, buffer_size=4096, progress_callba
 def send_response(sock, ok, message):
     msg_bytes = message.encode('utf-8')
     if len(msg_bytes) > 65535:
-        raise ValueError("message phan hoi qua dai")
+        raise ValueError("Message phan hoi qua dai")
     status = 1 if ok else 0
-    payload = struct.pack(f'!B H{len(msg_bytes)}s', status, len(msg_bytes), msg_bytes)
+    payload = struct.pack(f'!BH{len(msg_bytes)}s', status, len(msg_bytes), msg_bytes)
     sock.sendall(payload)
 
 
 def recv_response(sock):
     status_byte = recv_exact(sock, 1)[0]
-    if status_byte not in (0,1):
-        raise ValueError(f"status phản hồi không hợp lệ: {status_byte}")
+    if status_byte not in (0, 1):
+        raise ValueError(f"Status phan hoi khong hop le: {status_byte}")
 
     msg_len = struct.unpack('!H', recv_exact(sock, 2))[0]
     if msg_len:
-        messege_bytes = recv_exact(sock, msg_len)
+        message_bytes = recv_exact(sock, msg_len)
         try:
-            message = messege_bytes.decode('utf-8')
+            message = message_bytes.decode('utf-8')
         except UnicodeDecodeError:
-            raise ValueError("message phản hồi không phải UTF-8 hợp lệ")
+            raise ValueError("Message phan hoi khong phai UTF-8 hop le")
     else:
         message = ''
+
     return (status_byte == 1), message
 
 
-# ---------- Giu lai ham cu (tuong thich nguoc, khong dung trong ban GUI) ----------
-def recv_file(sock,save_dir,buffer_size = 4096):
+def recv_file(sock, save_dir, buffer_size=4096):
     if buffer_size <= 0:
         raise ValueError("buffer_size phai lon hon 0")
-    filename,file_size = recv_file_header(sock)
-    save_path = os.path.join(save_dir,filename)
+    filename, file_size = recv_file_header(sock)
+    save_path = os.path.join(save_dir, filename)
     recv_file_data(sock, save_path, file_size, buffer_size)
     print(f" -> [SUCCESS] Da nhan: {filename} ({file_size} bytes)")
     return True
-
-    
