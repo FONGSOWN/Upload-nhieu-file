@@ -42,7 +42,7 @@ except ImportError:
             meta = struct.pack(protocol.HEADER_STRUCT, len(filename_bytes), filesize)
             sock.sendall(meta + filename_bytes)
 
-            # 2. Truyền nội dung file
+            # 2. Truyền nội dung file kèm giới hạn chính xác số byte
             sent = 0
             with open(filepath, "rb") as f:
                 while sent < filesize:
@@ -77,7 +77,7 @@ except ImportError:
             raw_str = buf.decode("utf-8", errors="replace").strip()
             if raw_str.upper().startswith("OK") or "ACK" in raw_str.upper():
                 return True, raw_str
-            return False, raw_str or "Lỗi không xác định từ Server"
+            return False, raw_str or "Lỗi từ Server"
 
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -124,12 +124,13 @@ def format_size(num_bytes):
 
 class FileRow:
     """Widget quản lý hiển thị 1 hàng file trong danh sách giao diện."""
-    def __init__(self, parent, filepath, index, style, on_cancel=None):
+    def __init__(self, parent, filepath, index, style):
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
         self.status = STATUS_WAIT
         self.style = style
         self.cancel_event = threading.Event()
+        self.active_socket = None  # Tham chiếu để đóng socket lập tức khi hủy
 
         bg = COL_CARD if index % 2 == 0 else COL_CARD_ALT
 
@@ -143,7 +144,7 @@ class FileRow:
         self.frame.columnconfigure(1, weight=3, minsize=160)
         self.frame.columnconfigure(2, weight=1, minsize=90)
         self.frame.columnconfigure(3, weight=2, minsize=130)
-        self.frame.columnconfigure(4, weight=0, minsize=40)
+        self.frame.columnconfigure(4, weight=0, minsize=36)
 
         try:
             size_txt = format_size(os.path.getsize(filepath))
@@ -214,7 +215,7 @@ class FileRow:
         self.btn_cancel = tk.Button(
             self.frame,
             text="✕",
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg="#9ca3af",
             bg=bg,
             activeforeground="#ef4444",
@@ -223,11 +224,18 @@ class FileRow:
             cursor="hand2",
             command=self.cancel,
         )
-        self.btn_cancel.grid(row=0, column=4, padx=(6, 0))
+        self.btn_cancel.grid(row=0, column=4, padx=(4, 0))
 
     def cancel(self):
+        """Hủy tác vụ và ép đóng socket ngay lập tức."""
         if self.status in (STATUS_WAIT, STATUS_UPLOADING):
             self.cancel_event.set()
+            if self.active_socket:
+                try:
+                    self.active_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                self.active_socket.close()
             self.set_status(STATUS_CANCELED, "Đã hủy")
 
     def set_progress(self, percent, info_text=None):
@@ -290,7 +298,7 @@ class UploadApp:
     def _worker_loop(self):
         while self.is_running:
             try:
-                task = self.task_queue.get(timeout=1.0)
+                task = self.task_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
@@ -305,7 +313,7 @@ class UploadApp:
 
             with self.concurrency_cond:
                 while self.is_running and self.active_uploads >= self.max_concurrent:
-                    self.concurrency_cond.wait(timeout=0.5)
+                    self.concurrency_cond.wait(timeout=0.3)
 
                 if not self.is_running or row.cancel_event.is_set():
                     self.task_queue.task_done()
@@ -346,7 +354,7 @@ class UploadApp:
 
         tk.Label(
             header_bar,
-            text="Binary Protocol (TLV + Dynamic Timeout)",
+            text="Binary TLV Protocol | Instant Cancel",
             bg=COL_PRIMARY,
             fg="#c7d2fe",
             font=("Segoe UI", 9),
@@ -604,10 +612,12 @@ class UploadApp:
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(calc_timeout)
+            row.active_socket = sock  # Gán socket để row.cancel() có thể can thiệp ngay
 
             with self.sock_lock:
                 if not self.is_running or row.cancel_event.is_set():
                     sock.close()
+                    row.active_socket = None
                     return
                 self.active_sockets.add(sock)
 
@@ -654,6 +664,7 @@ class UploadApp:
                 self.gui_queue.put(("status", row, STATUS_ERROR, str(e)))
 
         finally:
+            row.active_socket = None
             if sock:
                 with self.sock_lock:
                     self.active_sockets.discard(sock)
@@ -706,7 +717,7 @@ class UploadApp:
         self.is_running = False
 
         for row in self.rows.values():
-            row.cancel_event.set()
+            row.cancel()
 
         with self.concurrency_cond:
             self.concurrency_cond.notify_all()
