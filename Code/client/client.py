@@ -1,8 +1,33 @@
 import os
 import sys
 import socket
-import config
-from shared import protocol
+
+# Nạp config và protocol dự phòng nếu file chưa sẵn sàng
+try:
+    import config
+except ImportError:
+    class config:
+        HOST = "127.0.0.1"
+        PORT = 8888
+        BUFFER_SIZE = 64 * 1024
+        TIMEOUT = 15.0
+
+try:
+    from shared import protocol
+except ImportError:
+    # Định nghĩa protocol dự phòng cơ bản nếu module shared.protocol bị thiếu
+    class protocol:
+        @staticmethod
+        def send_file(sock, filepath, buffer_size=64 * 1024):
+            filename = os.path.basename(filepath)
+            filesize = os.path.getsize(filepath)
+            # Header định dạng đơn giản: TÊN_FILE:KÍCH_THƯỚC\n
+            header = f"{filename}:{filesize}\n".encode("utf-8")
+            sock.sendall(header)
+            
+            with open(filepath, "rb") as f:
+                while chunk := f.read(buffer_size):
+                    sock.sendall(chunk)
 
 
 def validate_files(file_list):
@@ -42,13 +67,18 @@ def validate_files(file_list):
 
 def _recv_response(sock, max_bytes=1024):
     """
-    Nhận phản hồi từ server, đảm bảo xử lý socket timeout và cắt dòng chuẩn.
-    Nếu protocol của bạn có hàm nhận phản hồi riêng, nên ưu tiên dùng protocol.
+    Nhận phản hồi từ server, xử lý timeout và cắt khoảng trắng.
+    Ưu tiên dùng hàm nhận từ protocol nếu có định dạng riêng.
     """
-    data = sock.recv(max_bytes)
-    if not data:
+    try:
+        data = sock.recv(max_bytes)
+        if not data:
+            return None
+        return data.decode("utf-8", errors="replace").strip()
+    except socket.timeout:
+        raise
+    except OSError:
         return None
-    return data.decode("utf-8", errors="replace").strip()
 
 
 def start_client(file_list):
@@ -60,7 +90,7 @@ def start_client(file_list):
 
     host = getattr(config, "HOST", "127.0.0.1")
     port = getattr(config, "PORT", 8888)
-    buffer_size = getattr(config, "BUFFER_SIZE", 64 * 1024)  # Tăng lên 64KB để tối ưu I/O throughput
+    buffer_size = getattr(config, "BUFFER_SIZE", 64 * 1024)
     timeout = getattr(config, "TIMEOUT", 15.0)
 
     total = len(valid_files)
@@ -95,8 +125,13 @@ def start_client(file_list):
                 print(f"[-] Lỗi gửi file {fname}: {send_err}")
                 continue
 
-            # 2. Đợi phản hồi ACK/OK từ Server
-            ack = _recv_response(client)
+            # 2. Chờ phản hồi ACK/OK từ Server
+            try:
+                ack = _recv_response(client)
+            except socket.timeout:
+                print(f"[-] Timeout: Quá thời gian chờ phản hồi từ Server cho file: {fname}")
+                break
+
             if ack is None:
                 print(f"[-] Server đã đóng kết nối đột ngột khi đang xử lý: {fname}")
                 break
@@ -109,7 +144,7 @@ def start_client(file_list):
                 print(f"[?] Phản hồi lạ hoặc lỗi từ Server ({fname}): {ack}\n")
 
     except socket.timeout:
-        print("[-] Lỗi: Quá thời gian chờ (Timeout) từ Server!")
+        print("[-] Lỗi: Quá thời gian chờ (Timeout) khi thao tác với Socket!")
     except ConnectionRefusedError:
         print(f"[-] Lỗi: Không thể kết nối tới {host}:{port}. Server chưa chạy hoặc sai cổng.")
     except ConnectionResetError:
@@ -133,5 +168,6 @@ def start_client(file_list):
 
 
 if __name__ == "__main__":
+    # Lấy danh sách file từ CLI arguments: python client.py file1.txt file2.zip
     files_to_send = sys.argv[1:] if len(sys.argv) > 1 else ["test.txt", "data.zip"]
     start_client(files_to_send)
