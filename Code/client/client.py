@@ -28,20 +28,26 @@ except ImportError:
             filename_bytes = os.path.basename(filepath).encode("utf-8")
             filesize = os.path.getsize(filepath)
 
-            # 1. Đóng gói Header: [4B Tên file len][8B Kích thước file][Tên file bytes]
+            # 1. Gửi Header: [4B Độ dài tên][8B Dung lượng][Tên file bytes]
             header = struct.pack(protocol.HEADER_STRUCT, len(filename_bytes), filesize)
             sock.sendall(header + filename_bytes)
 
-            # 2. Truyền nội dung file kèm tiến trình
+            # 2. Truyền nội dung file kèm giới hạn chính xác filesize
             bytes_sent = 0
             start_time = time.time()
 
             with open(filepath, "rb") as f:
-                while chunk := f.read(buffer_size):
+                while bytes_sent < filesize:
+                    # Chỉ đọc tối đa số byte còn lại theo header đã gửi
+                    chunk_to_read = min(buffer_size, filesize - bytes_sent)
+                    chunk = f.read(chunk_to_read)
+                    if not chunk:
+                        raise IOError(f"File bị cắt ngắn bất ngờ trong khi gửi: {filepath}")
+
                     sock.sendall(chunk)
                     bytes_sent += len(chunk)
 
-                    # Hiển thị progress bar dạng text
+                    # Hiển thị progress bar
                     percent = (bytes_sent / filesize) * 100
                     elapsed = max(time.time() - start_time, 0.001)
                     speed_kb = (bytes_sent / 1024) / elapsed
@@ -50,11 +56,11 @@ except ImportError:
                     bar = "=" * filled + "-" * (bar_length - filled)
 
                     sys.stdout.write(
-                        f"\r    [{bar}] {percent:5.1f}% | {bytes_sent / (1024*1024):.2f}/{filesize / (1024*1024):.2f} MB | {speed_kb:.1f} KB/s"
+                        f"\r    [{bar}] {percent:5.1f}% | {bytes_sent / (1024 * 1024):.2f}/{filesize / (1024 * 1024):.2f} MB | {speed_kb:.1f} KB/s"
                     )
                     sys.stdout.flush()
 
-            print()  # Xuống dòng sau khi kết thúc thanh tiến trình
+            print()  # Xuống dòng sau khi hoàn tất thanh tiến trình
 
 
 def validate_files(file_list):
@@ -93,9 +99,7 @@ def validate_files(file_list):
 
 
 def _recv_response_line(sock, max_bytes=1024):
-    """
-    Đọc dữ liệu đến ký tự newline '\n' để đảm bảo không bị dính gói byte ACK.
-    """
+    """Đọc dữ liệu đến ký tự newline '\\n' để đảm bảo không bị dính byte ACK."""
     buffer = bytearray()
     while len(buffer) < max_bytes:
         chunk = sock.recv(1)
