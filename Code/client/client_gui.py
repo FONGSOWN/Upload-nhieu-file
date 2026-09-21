@@ -6,15 +6,40 @@ import queue
 import time
 import logging
 
-# Them duong dan toi thu muc shared
+# Thêm đường dẫn tới thư mục shared
 sys.path.append(
     os.path.abspath(
         os.path.join(os.path.dirname(__file__), '../shared')
     )
 )
 
-import config
-import protocol
+try:
+    import config
+except ImportError:
+    # Fallback dự phòng nếu chưa có file config
+    class config:
+        HOST = '127.0.0.1'
+        PORT = 8888
+        BUFFER_SIZE = 4096
+        MAX_CONCURRENT_UPLOADS = 3
+
+try:
+    import protocol
+except ImportError:
+    # Fallback giả lập protocol nếu chạy thử độc lập
+    class protocol:
+        @staticmethod
+        def send_file(sock, filepath, buffer_size, progress_cb):
+            size = os.path.getsize(filepath)
+            sent = 0
+            while sent < size:
+                time.sleep(0.01)
+                sent += min(buffer_size, size - sent)
+                progress_cb(sent, size)
+
+        @staticmethod
+        def recv_response(sock):
+            return True, "Thành công"
 
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -26,14 +51,14 @@ except ImportError:
     DND_AVAILABLE = False
 
 
-STATUS_WAIT = "Cho"
-STATUS_UPLOADING = "Dang tai"
-STATUS_DONE = "Hoan tat"
-STATUS_ERROR = "Loi"
+STATUS_WAIT = "Chờ"
+STATUS_UPLOADING = "Đang tải"
+STATUS_DONE = "Hoàn tất"
+STATUS_ERROR = "Lỗi"
 
 
 # ---------------------------------------------------------------------------
-# Bang mau (flat design)
+# Bảng màu (Flat Design)
 # ---------------------------------------------------------------------------
 
 COL_BG = "#f3f4f8"
@@ -44,7 +69,6 @@ COL_PRIMARY = "#4f46e5"
 COL_PRIMARY_DARK = "#4338ca"
 COL_TEXT = "#111827"
 COL_SUBTEXT = "#6b7280"
-
 
 STATUS_STYLE = {
     STATUS_WAIT: {
@@ -73,23 +97,13 @@ STATUS_STYLE = {
 def format_size(n):
     for unit in ["B", "KB", "MB", "GB"]:
         if n < 1024:
-            return (
-                f"{n:.0f} {unit}"
-                if unit == "B"
-                else f"{n:.1f} {unit}"
-            )
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
-
     return f"{n:.1f} TB"
 
 
 class FileRow:
-    """
-    1 the (card), ung voi 1 file:
-    ten, kich thuoc, progress bar mau theo trang thai,
-    badge trang thai va toc do/ghi chu rieng cho tung file.
-    """
-
+    """1 thẻ ứng với 1 file trong danh sách."""
     def __init__(self, parent, filepath, index, style):
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
@@ -98,28 +112,11 @@ class FileRow:
 
         bg = COL_CARD if index % 2 == 0 else COL_CARD_ALT
 
-        self.outer = tk.Frame(
-            parent,
-            bg=COL_BORDER
-        )
-        self.outer.pack(
-            fill='x',
-            expand=True,
-            pady=(0, 1)
-        )
+        self.outer = tk.Frame(parent, bg=COL_BORDER)
+        self.outer.pack(fill='x', expand=True, pady=(0, 1))
 
-        self.frame = tk.Frame(
-            self.outer,
-            bg=bg,
-            padx=14,
-            pady=10
-        )
-        self.frame.pack(
-            fill='x',
-            expand=True,
-            padx=0,
-            pady=(0, 1)
-        )
+        self.frame = tk.Frame(self.outer, bg=bg, padx=14, pady=10)
+        self.frame.pack(fill='x', expand=True, padx=0, pady=(0, 1))
 
         self.frame.columnconfigure(0, weight=3, minsize=220)
         self.frame.columnconfigure(1, weight=3, minsize=170)
@@ -129,15 +126,15 @@ class FileRow:
         try:
             size_txt = format_size(os.path.getsize(filepath))
         except OSError:
-            size_txt = ""
+            size_txt = "0 B"
 
-        # Ten file
+        # Tên file & dung lượng
         name_box = tk.Frame(self.frame, bg=bg)
         name_box.grid(row=0, column=0, sticky='w', padx=(0, 10))
 
         tk.Label(
             name_box,
-            text="\U0001F4C4  " + self.filename,
+            text="📄 " + (self.filename if len(self.filename) <= 30 else self.filename[:27] + "..."),
             bg=bg,
             fg=COL_TEXT,
             font=('Segoe UI', 10, 'bold'),
@@ -159,12 +156,8 @@ class FileRow:
             bar_style_name,
             troughcolor="#e5e7eb",
             background=STATUS_STYLE[STATUS_WAIT]["bar"],
-            bordercolor="#e5e7eb",
-            lightcolor=STATUS_STYLE[STATUS_WAIT]["bar"],
-            darkcolor=STATUS_STYLE[STATUS_WAIT]["bar"],
             thickness=10
         )
-
         self.bar_style_name = bar_style_name
 
         self.progress = ttk.Progressbar(
@@ -176,7 +169,7 @@ class FileRow:
         )
         self.progress.grid(row=0, column=1, sticky='ew', padx=6)
 
-        # Badge trang thai
+        # Badge trạng thái
         self.badge = tk.Label(
             self.frame,
             text=self.status,
@@ -188,7 +181,7 @@ class FileRow:
         )
         self.badge.grid(row=0, column=2)
 
-        # Thong tin
+        # Tốc độ / ghi chú
         self.lbl_info = tk.Label(
             self.frame,
             text='',
@@ -216,9 +209,7 @@ class FileRow:
 
         self.style.configure(
             self.bar_style_name,
-            background=st["bar"],
-            lightcolor=st["bar"],
-            darkcolor=st["bar"]
+            background=st["bar"]
         )
 
         if info_text is not None:
@@ -226,12 +217,11 @@ class FileRow:
 
 
 class UploadApp:
-
     def __init__(self, root):
         self.root = root
-        self.root.title("UDM_10 - Upload nhieu file len Server")
-        self.root.geometry("860x580")
-        self.root.minsize(700, 420)
+        self.root.title("UDM_10 - Upload nhiều file lên Server")
+        self.root.geometry("900x600")
+        self.root.minsize(750, 450)
         self.root.configure(bg=COL_BG)
 
         self.style = ttk.Style()
@@ -242,46 +232,59 @@ class UploadApp:
 
         self.style.configure('TSpinbox', arrowsize=12)
 
-        self.max_concurrent_var = tk.IntVar(
-            value=getattr(config, 'MAX_CONCURRENT_UPLOADS', 3)
-        )
-        
-        # Dung Semaphore dong
-        self.semaphore = threading.Semaphore(self.max_concurrent_var.get())
+        # Quản lý hàng đợi tải lên (Worker Pool) thay vì tạo Thread vô tội vạ
+        self.max_concurrent = getattr(config, 'MAX_CONCURRENT_UPLOADS', 3)
+        self.max_concurrent_var = tk.IntVar(value=self.max_concurrent)
 
+        self.task_queue = queue.Queue()
         self.gui_queue = queue.Queue()
         self.rows = {}
         self.row_count = 0
 
-        self._build_ui()
+        # Khởi động pool worker threads
+        self._start_worker_threads(self.max_concurrent)
 
-        # Bat dau kiem tra queue GUI
+        self._build_ui()
         self.root.after(100, self._poll_gui_queue)
 
-    def _build_ui(self):
+    def _start_worker_threads(self, num_workers):
+        for _ in range(num_workers):
+            t = threading.Thread(target=self._worker_loop, daemon=True)
+            t.start()
 
-        # ---- Thanh tieu de ----
+    def _worker_loop(self):
+        """Worker thread liên tục lấy file từ task_queue để gửi."""
+        while True:
+            task = self.task_queue.get()
+            if task is None:
+                break
+            filepath, row = task
+            self._do_upload(filepath, row)
+            self.task_queue.task_done()
+
+    def _build_ui(self):
+        # ---- Thanh tiêu đề ----
         header_bar = tk.Frame(self.root, bg=COL_PRIMARY, height=56)
         header_bar.pack(fill='x')
         header_bar.pack_propagate(False)
 
         tk.Label(
             header_bar,
-            text="\U0001F4E4  Upload nhieu file len Server",
+            text="📤  Upload nhiều file lên Server",
             bg=COL_PRIMARY,
             fg="white",
-            font=('Segoe UI', 14, 'bold')
+            font=('Segoe UI', 13, 'bold')
         ).pack(side='left', padx=16)
 
         tk.Label(
             header_bar,
-            text="UDM_10",
+            text="UDM_10 Client",
             bg=COL_PRIMARY,
             fg="#c7d2fe",
             font=('Segoe UI', 10)
         ).pack(side='right', padx=16)
 
-        # ---- Thanh dieu khien ----
+        # ---- Thanh điều khiển ----
         top = tk.Frame(self.root, bg=COL_BG, pady=10, padx=14)
         top.pack(fill='x')
 
@@ -290,7 +293,7 @@ class UploadApp:
 
         server_pill = tk.Label(
             top,
-            text=f"\U0001F5A5  {server_host}:{server_port}",
+            text=f"🖥  {server_host}:{server_port}",
             bg="#eef2ff",
             fg=COL_PRIMARY_DARK,
             font=('Segoe UI', 9, 'bold'),
@@ -301,13 +304,13 @@ class UploadApp:
 
         tk.Label(
             top,
-            text="    Dong thoi toi da:",
+            text="    Đồng thời tối đa:",
             bg=COL_BG,
             fg=COL_SUBTEXT,
             font=('Segoe UI', 9)
         ).pack(side='left')
 
-        spin = ttk.Spinbox(
+        self.spin = ttk.Spinbox(
             top,
             from_=1,
             to=10,
@@ -315,11 +318,11 @@ class UploadApp:
             textvariable=self.max_concurrent_var,
             command=self._on_concurrency_change
         )
-        spin.pack(side='left', padx=(4, 0))
+        self.spin.pack(side='left', padx=(4, 0))
 
         choose_btn = tk.Button(
             top,
-            text="+ Chon file...",
+            text="+ Chọn file...",
             command=self._choose_files,
             bg=COL_PRIMARY,
             fg="white",
@@ -334,7 +337,7 @@ class UploadApp:
         )
         choose_btn.pack(side='right')
 
-        # ---- Khu vuc keo-tha ----
+        # ---- Khu vực kéo-thả ----
         drop_wrap = tk.Frame(self.root, bg=COL_BG, padx=14)
         drop_wrap.pack(fill='x')
 
@@ -342,14 +345,14 @@ class UploadApp:
             drop_bg = "#eef2ff"
             drop_fg = COL_PRIMARY_DARK
             drop_border = COL_PRIMARY
-            drop_text = "\u2B07  Keo & tha file vao day de upload"
-            drop_sub = "hoac bam nut 'Chon file...' phia tren"
+            drop_text = "⬇  Kéo & thả file vào đây để upload"
+            drop_sub = "hoặc nhấn nút '+ Chọn file...' phía trên"
         else:
             drop_bg = "#fff7ed"
             drop_fg = "#c2410c"
             drop_border = "#fdba74"
-            drop_text = "\u26A0  Chua cai tkinterdnd2 nen khong keo-tha duoc"
-            drop_sub = "chay: pip install tkinterdnd2  —  hoac dung nut 'Chon file...'"
+            drop_text = "⚠  Chưa cài thư viện tkinterdnd2"
+            drop_sub = "Chạy lệnh: pip install tkinterdnd2 (hoặc dùng nút '+ Chọn file...')"
 
         drop_border_frame = tk.Frame(drop_wrap, bg=drop_border)
         drop_border_frame.pack(fill='x', pady=(0, 10))
@@ -358,8 +361,8 @@ class UploadApp:
             drop_border_frame,
             bg=drop_bg,
             fg=drop_fg,
-            font=('Segoe UI', 12, 'bold'),
-            pady=12,
+            font=('Segoe UI', 11, 'bold'),
+            pady=10,
             text=drop_text
         )
         self.drop_area.pack(fill='x', padx=2, pady=(2, 0))
@@ -369,7 +372,7 @@ class UploadApp:
             bg=drop_bg,
             fg=COL_SUBTEXT,
             font=('Segoe UI', 9),
-            pady=4,
+            pady=3,
             text=drop_sub
         )
         self.drop_sub.pack(fill='x', padx=2, pady=(0, 2))
@@ -379,15 +382,15 @@ class UploadApp:
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind('<<Drop>>', self._on_drop)
 
-        # ---- Header cot ----
+        # ---- Header bảng cột ----
         col_header = tk.Frame(self.root, bg=COL_BG, padx=14)
         col_header.pack(fill='x')
 
         headers = [
-            ("TEN FILE", 3),
-            ("TIEN TRINH", 3),
-            ("TRANG THAI", 1),
-            ("TOC DO / GHI CHU", 2)
+            ("TÊN FILE", 3),
+            ("TIẾN TRÌNH", 3),
+            ("TRẠNG THÁI", 1),
+            ("TỐC ĐỘ / THỜI GIAN", 2)
         ]
 
         for i, (text, weight) in enumerate(headers):
@@ -405,7 +408,7 @@ class UploadApp:
             )
             col_header.columnconfigure(i, weight=weight)
 
-        # ---- Danh sach file ----
+        # ---- Khung danh sách cuộn ----
         container = tk.Frame(self.root, bg=COL_BG, padx=14, pady=6)
         container.pack(fill='both', expand=True)
 
@@ -426,7 +429,6 @@ class UploadApp:
         )
 
         self.list_frame = tk.Frame(self.canvas, bg=COL_CARD)
-
         self.list_frame.bind(
             '<Configure>',
             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all'))
@@ -438,17 +440,14 @@ class UploadApp:
             anchor='nw'
         )
 
-        # Tu dong fit chieu rong list_frame theo canvas
         self.canvas.bind(
             '<Configure>',
             lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width)
         )
 
-        # Ho tro cuon chuot (MouseWheel)
-        self.canvas.bind_all(
-            "<MouseWheel>",
-            lambda event: self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        )
+        # Cuộn chuột an toàn khi trỏ vào khu vực danh sách
+        self.canvas.bind("<Enter>", lambda _: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel))
+        self.canvas.bind("<Leave>", lambda _: self.canvas.unbind_all("<MouseWheel>"))
 
         self.canvas.configure(yscrollcommand=scrollbar.set)
         self.canvas.pack(side='left', fill='both', expand=True, padx=1, pady=1)
@@ -456,45 +455,48 @@ class UploadApp:
 
         self.empty_label = tk.Label(
             self.list_frame,
-            text="Chua co file nao. Hay them file de upload.",
+            text="Chưa có file nào được chọn. Hãy thêm file để bắt đầu tải lên.",
             bg=COL_CARD,
             fg=COL_SUBTEXT,
             font=('Segoe UI', 10),
-            pady=30
+            pady=40
         )
         self.empty_label.pack(fill='x')
 
-        # ---- Thanh trang thai tong ----
+        # ---- Thanh trạng thái tổng ----
         bottom = tk.Frame(self.root, bg="#eef0f5", padx=14, pady=8)
         bottom.pack(fill='x', side='bottom')
 
         self.lbl_summary = tk.Label(
             bottom,
-            text="San sang.",
+            text="Sẵn sàng.",
             bg="#eef0f5",
             fg=COL_TEXT,
             font=('Segoe UI', 9)
         )
         self.lbl_summary.pack(side='left')
 
-    # ----------------------Su kien-------------------------------------------------
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _on_concurrency_change(self):
-        new_val = max(1, self.max_concurrent_var.get())
-        self.semaphore = threading.Semaphore(new_val)
+        try:
+            new_val = max(1, min(10, int(self.max_concurrent_var.get())))
+            diff = new_val - self.max_concurrent
+            if diff > 0:
+                self._start_worker_threads(diff)
+            self.max_concurrent = new_val
+        except (ValueError, tk.TclError):
+            pass
 
     def _choose_files(self):
-        paths = filedialog.askopenfilenames(title="Chon file de upload")
+        paths = filedialog.askopenfilenames(title="Chọn file để upload")
         if paths:
             self._add_files(paths)
 
     def _on_drop(self, event):
-        raw_data = event.data
-        if raw_data.startswith('{') and raw_data.endswith('}'):
-            paths = self.root.tk.splitlist(raw_data)
-        else:
-            paths = self.root.tk.splitlist(raw_data)
-            
+        # TkinterDnD parse danh sách file an toàn
+        paths = self.root.tk.splitlist(event.data)
         clean_paths = [p.strip('{}') for p in paths]
         self._add_files(clean_paths)
 
@@ -521,40 +523,31 @@ class UploadApp:
             self.row_count += 1
             added += 1
 
-            t = threading.Thread(
-                target=self._upload_worker,
-                args=(p, row),
-                daemon=True
-            )
-            t.start()
+            # Đẩy vào task_queue để worker xử lý theo giới hạn luồng
+            self.task_queue.put((p, row))
 
         if added:
             self._update_summary()
 
-    # ----------------Luong upload (thread rieng)-------------------------------
-
-    def _upload_worker(self, filepath, row):
-        sem = self.semaphore
-        sem.acquire()
-
+    def _do_upload(self, filepath, row):
+        """Hàm thực thi upload được gọi bởi Worker thread."""
         sock = None
         start_time = time.time()
         filename = os.path.basename(filepath)
-
-        logging.info(f"Bat dau upload: {filename}")
+        logging.info(f"Bắt đầu upload: {filename}")
 
         try:
-            self.gui_queue.put(('status', row, STATUS_UPLOADING, "Dang ket noi..."))
+            self.gui_queue.put(('status', row, STATUS_UPLOADING, "Đang kết nối..."))
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(15)
-            
+            sock.settimeout(10.0)
+
             host = getattr(config, 'HOST', '127.0.0.1')
             port = getattr(config, 'PORT', 8888)
             buffer_size = getattr(config, 'BUFFER_SIZE', 4096)
 
             sock.connect((host, port))
-            sock.settimeout(None)
+            sock.settimeout(None)  # Tắt timeout kết nối, chuyển sang chế độ stream dữ liệu
 
             last_time = [time.time()]
             last_bytes = [0]
@@ -562,64 +555,57 @@ class UploadApp:
             def progress_cb(sent, total):
                 now = time.time()
                 elapsed = now - last_time[0]
-
-                if elapsed >= 0.2 or sent >= total:
+                if elapsed >= 0.15 or sent >= total:
                     speed_kb = ((sent - last_bytes[0]) / 1024 / elapsed) if elapsed > 0 else 0
                     percent = (sent / total * 100) if total > 0 else 100
                     total_time = now - start_time
-
                     info = f"{speed_kb:.1f} KB/s | {total_time:.1f}s"
-
+                    
                     last_time[0] = now
                     last_bytes[0] = sent
-
                     self.gui_queue.put(('progress', row, percent, info))
 
-            # Gui file qua module protocol
+            # Gửi file qua module protocol
             protocol.send_file(sock, filepath, buffer_size, progress_cb)
 
-            # Nhan phan hoi
+            # Nhận phản hồi từ Server
             ok, message = protocol.recv_response(sock)
 
             if ok:
                 self.gui_queue.put(('progress', row, 100, ''))
                 total_time = time.time() - start_time
-                note = f"Da luu: {message}" if message != row.filename else "Thanh cong"
-
+                note = f"Đã lưu ({total_time:.1f}s)"
                 self.gui_queue.put(('status', row, STATUS_DONE, note))
-                logging.info(f"Upload thanh cong: {filename} - {total_time:.2f}s")
+                logging.info(f"Upload thành công: {filename} ({total_time:.2f}s)")
             else:
                 self.gui_queue.put(('status', row, STATUS_ERROR, message))
-                logging.error(f"Upload that bai: {filename} - {message}")
+                logging.error(f"Upload thất bại: {filename} - {message}")
 
         except Exception as e:
             self.gui_queue.put(('status', row, STATUS_ERROR, str(e)))
-            logging.error(f"Loi upload: {filename} - {str(e)}")
+            logging.error(f"Lỗi upload: {filename} - {str(e)}")
 
         finally:
             if sock:
                 try:
-                    sock.close()
-                except Exception:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
                     pass
+                sock.close()
 
-            sem.release()
             self.gui_queue.put(('summary', None, None, None))
 
-    # -----Cap nhat GUI an toan tu main thread------------
-
     def _poll_gui_queue(self):
+        """Lấy các sự kiện từ Worker chuyển về cập nhật trên Main Thread."""
         try:
             while True:
                 kind, row, a, b = self.gui_queue.get_nowait()
-
                 if kind == 'progress':
                     row.set_progress(a, b)
                 elif kind == 'status':
                     row.set_status(a, b)
                 elif kind == 'summary':
                     self._update_summary()
-
         except queue.Empty:
             pass
 
@@ -634,11 +620,11 @@ class UploadApp:
 
         self.lbl_summary.config(
             text=(
-                f"Tong: {total}   •   "
-                f"Cho: {waiting}   •   "
-                f"Dang tai: {uploading}   •   "
-                f"Hoan tat: {done}   •   "
-                f"Loi: {error}"
+                f"Tổng: {total}   •   "
+                f"Chờ: {waiting}   •   "
+                f"Đang tải: {uploading}   •   "
+                f"Hoàn tất: {done}   •   "
+                f"Lỗi: {error}"
             )
         )
 
