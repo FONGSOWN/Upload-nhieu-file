@@ -23,29 +23,27 @@ def send_file(sock: socket.socket, filepath: str) -> bool:
     print(f"\n[*] Bắt đầu gửi: '{filename}' ({filesize / 1024:.2f} KB)")
 
     try:
-        # 1. Gửi Header nhị phân cố định (12 bytes: name_len + filesize)
+        # 1. Gửi Header nhị phân kèm Tên file trong 1 lượt gửi duy nhất
         header = struct.pack(HEADER_STRUCT, name_len, filesize)
-        sock.sendall(header)
+        sock.sendall(header + filename_bytes)
 
-        # 2. Gửi Tên file
-        sock.sendall(filename_bytes)
-
-        # 3. Gửi nội dung dữ liệu file theo từng chunk
+        # 2. Gửi nội dung dữ liệu file theo từng chunk
         sent_bytes = 0
         with open(filepath, "rb") as f:
             while chunk := f.read(BUFFER_SIZE):
                 sock.sendall(chunk)
                 sent_bytes += len(chunk)
-                # Hiển thị tiến trình đơn giản
+
+                # Hiển thị tiến trình
                 percent = (sent_bytes / filesize) * 100 if filesize > 0 else 100
                 sys.stdout.write(f"\r    Tiến trình: {percent:.1f}% ({sent_bytes}/{filesize} bytes)")
                 sys.stdout.flush()
 
         print()
 
-        # 4. Chờ phản hồi từ Server (ACK\n hoặc ERROR: ...\n)
+        # 3. Chờ phản hồi xác nhận từ Server (ACK\n hoặc ERROR)
         response = sock.recv(1024).decode("utf-8", errors="replace")
-        if response.startswith("ACK"):
+        if response.startswith("ACK") or response.startswith("OK"):
             print(f"[+] '{filename}' đã tải lên thành công!")
             return True
         else:
