@@ -62,22 +62,19 @@ except ImportError:
 
         @staticmethod
         def recv_response(sock, max_bytes=1024):
-            buf = bytearray()
-            while len(buf) < max_bytes:
-                chunk = sock.recv(1)
-                if not chunk:
-                    break
-                if chunk == b"\n":
-                    break
-                buf.extend(chunk)
+            try:
+                data = sock.recv(max_bytes)
+                if not data:
+                    return False, "Mất kết nối từ Server (EOF)"
 
-            if not buf:
-                return False, "Mất kết nối từ Server (EOF)"
+                line = data.split(b"\n")[0]
+                raw_str = line.decode("utf-8", errors="replace").strip()
 
-            raw_str = buf.decode("utf-8", errors="replace").strip()
-            if raw_str.upper().startswith("OK") or "ACK" in raw_str.upper():
-                return True, raw_str
-            return False, raw_str or "Lỗi từ Server"
+                if raw_str.upper().startswith("OK") or "ACK" in raw_str.upper():
+                    return True, raw_str
+                return False, raw_str or "Lỗi từ Server"
+            except Exception as e:
+                return False, f"Lỗi nhận phản hồi: {e}"
 
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -211,7 +208,6 @@ class FileRow:
         )
         self.lbl_info.grid(row=0, column=3, sticky="ew", padx=(10, 0))
 
-        # Nút hủy từng file
         self.btn_cancel = tk.Button(
             self.frame,
             text="✕",
