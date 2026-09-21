@@ -202,7 +202,7 @@ class UploadApp:
         self.current_concurrency = getattr(config, "MAX_CONCURRENT_UPLOADS", 3)
         self.max_concurrent_var = tk.IntVar(value=self.current_concurrency)
 
-        # Sử dụng Semaphore để quản lý số lượng luồng thực thi đồng thời
+        # Semaphore quản lý số luồng chạy thực tế
         self.concurrency_sem = threading.Semaphore(self.current_concurrency)
         self.sem_lock = threading.Lock()
 
@@ -256,8 +256,13 @@ class UploadApp:
                 for _ in range(diff):
                     self.concurrency_sem.release()
             elif diff < 0:
-                for _ in range(abs(diff)):
-                    self.concurrency_sem.acquire()
+                # Chạy acquire bất đồng bộ ở background thread để tránh làm đơ giao diện chính
+                reduction_count = abs(diff)
+                def shrink_semaphore(count):
+                    for _ in range(count):
+                        self.concurrency_sem.acquire()
+                threading.Thread(target=shrink_semaphore, args=(reduction_count,), daemon=True).start()
+                
             self.current_concurrency = new_val
 
     def _build_ui(self):
@@ -428,7 +433,6 @@ class UploadApp:
             lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width),
         )
 
-        # Hỗ trợ cuộn chuột tương thích cả Windows, Linux, macOS
         self.list_frame.bind("<Enter>", self._bind_mousewheel)
         self.list_frame.bind("<Leave>", self._unbind_mousewheel)
 
