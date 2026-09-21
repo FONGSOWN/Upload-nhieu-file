@@ -23,18 +23,18 @@ except ImportError:
         BUFFER_SIZE = 64 * 1024
         MAX_CONCURRENT_UPLOADS = 3
         SOCKET_TIMEOUT = 15.0
-        MIN_SPEED_BPS = 100 * 1024  # Ước lượng tối thiểu 100 KB/s để tính Dynamic Timeout
+        MIN_SPEED_BPS = 100 * 1024  # Tối thiểu 100 KB/s để tính dynamic timeout
 
-# Fallback protocol nhị phân chuẩn TLV (Type-Length-Value)
+# Fallback protocol nhị phân chuẩn TLV
 try:
     import protocol
 except ImportError:
     class protocol:
-        HEADER_STRUCT = "!IQ"  # 4 bytes: name_length, 8 bytes: filesize (Big-Endian)
+        HEADER_STRUCT = "!IQ"  # 4 bytes: name_len, 8 bytes: filesize (Big-Endian)
         HEADER_SIZE = struct.calcsize(HEADER_STRUCT)
 
         @staticmethod
-        def send_file(sock, filepath, buffer_size, progress_cb=None):
+        def send_file(sock, filepath, buffer_size, progress_cb=None, cancel_event=None):
             filename_bytes = os.path.basename(filepath).encode("utf-8")
             filesize = os.path.getsize(filepath)
 
@@ -42,18 +42,26 @@ except ImportError:
             meta = struct.pack(protocol.HEADER_STRUCT, len(filename_bytes), filesize)
             sock.sendall(meta + filename_bytes)
 
-            # 2. Truyền luồng file và gọi callback
+            # 2. Truyền nội dung file
             sent = 0
             with open(filepath, "rb") as f:
-                while chunk := f.read(buffer_size):
+                while sent < filesize:
+                    if cancel_event and cancel_event.is_set():
+                        raise InterruptedError("Người dùng đã hủy truyền file.")
+
+                    chunk_limit = min(buffer_size, filesize - sent)
+                    chunk = f.read(chunk_limit)
+                    if not chunk:
+                        raise IOError(f"File bị cắt ngắn đột ngột: {filepath}")
+
                     sock.sendall(chunk)
                     sent += len(chunk)
+
                     if progress_cb:
                         progress_cb(sent, filesize)
 
         @staticmethod
         def recv_response(sock, max_bytes=1024):
-            # Nhận đến khi gặp ký tự phân tách '\n'
             buf = bytearray()
             while len(buf) < max_bytes:
                 chunk = sock.recv(1)
@@ -85,6 +93,7 @@ STATUS_WAIT = "Chờ"
 STATUS_UPLOADING = "Đang tải"
 STATUS_DONE = "Hoàn tất"
 STATUS_ERROR = "Lỗi"
+STATUS_CANCELED = "Đã hủy"
 
 COL_BG = "#f3f4f8"
 COL_CARD = "#ffffff"
@@ -100,6 +109,7 @@ STATUS_STYLE = {
     STATUS_UPLOADING: {"fg": "#1d4ed8", "bg": "#dbeafe", "bar": "#3b82f6"},
     STATUS_DONE: {"fg": "#15803d", "bg": "#dcfce7", "bar": "#22c55e"},
     STATUS_ERROR: {"fg": "#b91c1c", "bg": "#fee2e2", "bar": "#ef4444"},
+    STATUS_CANCELED: {"fg": "#6b7280", "bg": "#f3f4f6", "bar": "#9ca3af"},
 }
 
 
@@ -114,24 +124,26 @@ def format_size(num_bytes):
 
 class FileRow:
     """Widget quản lý hiển thị 1 hàng file trong danh sách giao diện."""
-    def __init__(self, parent, filepath, index, style):
+    def __init__(self, parent, filepath, index, style, on_cancel=None):
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
         self.status = STATUS_WAIT
         self.style = style
+        self.cancel_event = threading.Event()
 
         bg = COL_CARD if index % 2 == 0 else COL_CARD_ALT
 
         self.outer = tk.Frame(parent, bg=COL_BORDER)
         self.outer.pack(fill="x", expand=True, pady=(0, 1))
 
-        self.frame = tk.Frame(self.outer, bg=bg, padx=14, pady=8)
+        self.frame = tk.Frame(self.outer, bg=bg, padx=12, pady=8)
         self.frame.pack(fill="x", expand=True, padx=0, pady=(0, 1))
 
-        self.frame.columnconfigure(0, weight=3, minsize=220)
-        self.frame.columnconfigure(1, weight=3, minsize=170)
-        self.frame.columnconfigure(2, weight=1, minsize=100)
+        self.frame.columnconfigure(0, weight=3, minsize=200)
+        self.frame.columnconfigure(1, weight=3, minsize=160)
+        self.frame.columnconfigure(2, weight=1, minsize=90)
         self.frame.columnconfigure(3, weight=2, minsize=130)
+        self.frame.columnconfigure(4, weight=0, minsize=40)
 
         try:
             size_txt = format_size(os.path.getsize(filepath))
@@ -141,7 +153,7 @@ class FileRow:
         name_box = tk.Frame(self.frame, bg=bg)
         name_box.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
-        display_name = self.filename if len(self.filename) <= 30 else self.filename[:27] + "..."
+        display_name = self.filename if len(self.filename) <= 28 else self.filename[:25] + "..."
         tk.Label(
             name_box,
             text=f"📄 {display_name}",
@@ -183,7 +195,7 @@ class FileRow:
             font=("Segoe UI", 8, "bold"),
             fg=STATUS_STYLE[self.status]["fg"],
             bg=STATUS_STYLE[self.status]["bg"],
-            padx=10,
+            padx=8,
             pady=3,
         )
         self.badge.grid(row=0, column=2)
@@ -198,6 +210,26 @@ class FileRow:
         )
         self.lbl_info.grid(row=0, column=3, sticky="ew", padx=(10, 0))
 
+        # Nút hủy từng file
+        self.btn_cancel = tk.Button(
+            self.frame,
+            text="✕",
+            font=("Segoe UI", 8, "bold"),
+            fg="#9ca3af",
+            bg=bg,
+            activeforeground="#ef4444",
+            activebackground=bg,
+            bd=0,
+            cursor="hand2",
+            command=self.cancel,
+        )
+        self.btn_cancel.grid(row=0, column=4, padx=(6, 0))
+
+    def cancel(self):
+        if self.status in (STATUS_WAIT, STATUS_UPLOADING):
+            self.cancel_event.set()
+            self.set_status(STATUS_CANCELED, "Đã hủy")
+
     def set_progress(self, percent, info_text=None):
         self.progress["value"] = max(0.0, min(100.0, percent))
         if info_text is not None:
@@ -211,12 +243,15 @@ class FileRow:
         if info_text is not None:
             self.lbl_info.config(text=info_text)
 
+        if status in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELED):
+            self.btn_cancel.grid_remove()
+
 
 class UploadApp:
     def __init__(self, root):
         self.root = root
         self.root.title("UDM_10 - Upload nhiều file đồng thời")
-        self.root.geometry("940x630")
+        self.root.geometry("960x640")
         self.root.minsize(760, 480)
         self.root.configure(bg=COL_BG)
 
@@ -226,7 +261,6 @@ class UploadApp:
         except tk.TclError:
             pass
 
-        # Điều phối số luồng tải đồng thời bằng Condition Lock (khắc phục deadlock của Semaphore)
         self.max_concurrent = getattr(config, "MAX_CONCURRENT_UPLOADS", 3)
         self.active_uploads = 0
         self.concurrency_cond = threading.Condition()
@@ -237,7 +271,6 @@ class UploadApp:
         self.row_count = 0
         self.is_running = True
 
-        # Danh sách quản lý socket đang mở để giải phóng tức thì khi tắt app
         self.active_sockets = set()
         self.sock_lock = threading.Lock()
 
@@ -266,14 +299,17 @@ class UploadApp:
 
             filepath, row = task
 
-            # Chờ có slot khả dụng theo giới hạn hiện tại
+            if row.cancel_event.is_set():
+                self.task_queue.task_done()
+                continue
+
             with self.concurrency_cond:
                 while self.is_running and self.active_uploads >= self.max_concurrent:
                     self.concurrency_cond.wait(timeout=0.5)
 
-                if not self.is_running:
+                if not self.is_running or row.cancel_event.is_set():
                     self.task_queue.task_done()
-                    break
+                    continue
 
                 self.active_uploads += 1
 
@@ -418,6 +454,7 @@ class UploadApp:
             ("TIẾN TRÌNH", 3),
             ("TRẠNG THÁI", 1),
             ("TỐC ĐỘ / THỜI GIAN", 2),
+            ("", 0),
         ]
 
         for i, (text, weight) in enumerate(headers):
@@ -505,7 +542,6 @@ class UploadApp:
             self._add_files(paths)
 
     def _parse_dnd_paths(self, raw_data):
-        """Parse chính xác đường dẫn khi kéo thả kể cả khi chứa dấu cách và ngoặc nhọn."""
         pattern = r"\{([^}]+)\}|(\S+)"
         matches = re.findall(pattern, raw_data)
         return [m[0] or m[1] for m in matches if m[0] or m[1]]
@@ -545,7 +581,9 @@ class UploadApp:
     def _do_upload(self, filepath, row):
         sock = None
         start_time = time.time()
-        filename = os.path.basename(filepath)
+
+        if row.cancel_event.is_set():
+            return
 
         try:
             fsize = os.path.getsize(filepath)
@@ -562,15 +600,13 @@ class UploadApp:
             base_timeout = getattr(config, "SOCKET_TIMEOUT", 15.0)
             min_speed = getattr(config, "MIN_SPEED_BPS", 100 * 1024)
 
-            # Tính timeout co giãn theo dung lượng file
             calc_timeout = max(base_timeout, base_timeout + (fsize / min_speed))
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(calc_timeout)
 
-            # Đăng ký socket vào set theo dõi
             with self.sock_lock:
-                if not self.is_running:
+                if not self.is_running or row.cancel_event.is_set():
                     sock.close()
                     return
                 self.active_sockets.add(sock)
@@ -581,12 +617,12 @@ class UploadApp:
             last_bytes = [0]
 
             def progress_cb(sent, total):
-                if not self.is_running:
+                if not self.is_running or row.cancel_event.is_set():
                     raise InterruptedError("Tác vụ dừng bởi người dùng")
 
                 now = time.time()
                 elapsed = now - last_time[0]
-                if elapsed >= 0.12 or sent >= total:
+                if elapsed >= 0.15 or sent >= total:
                     speed_kb = ((sent - last_bytes[0]) / 1024 / elapsed) if elapsed > 0 else 0
                     percent = (sent / total * 100) if total > 0 else 100
                     total_time = now - start_time
@@ -597,9 +633,9 @@ class UploadApp:
                     self.gui_queue.put(("progress", row, percent, info))
 
             self.gui_queue.put(("status", row, STATUS_UPLOADING, "Đang truyền dữ liệu..."))
-            protocol.send_file(sock, filepath, buffer_size, progress_cb)
+            protocol.send_file(sock, filepath, buffer_size, progress_cb, row.cancel_event)
 
-            self.gui_queue.put(("status", row, STATUS_UPLOADING, "Đợi Server xác nhận..."))
+            self.gui_queue.put(("status", row, STATUS_UPLOADING, "Đợi xác nhận..."))
             ok, message = protocol.recv_response(sock)
 
             if ok:
@@ -610,13 +646,12 @@ class UploadApp:
                 self.gui_queue.put(("status", row, STATUS_ERROR, message))
 
         except Exception as e:
-            if not self.is_running or isinstance(e, InterruptedError):
-                err_msg = "Đã hủy"
+            if not self.is_running or row.cancel_event.is_set() or isinstance(e, InterruptedError):
+                self.gui_queue.put(("status", row, STATUS_CANCELED, "Đã hủy"))
             elif isinstance(e, socket.timeout):
-                err_msg = "Timeout phản hồi"
+                self.gui_queue.put(("status", row, STATUS_ERROR, "Timeout phản hồi"))
             else:
-                err_msg = str(e)
-            self.gui_queue.put(("status", row, STATUS_ERROR, err_msg))
+                self.gui_queue.put(("status", row, STATUS_ERROR, str(e)))
 
         finally:
             if sock:
@@ -631,7 +666,6 @@ class UploadApp:
             self.gui_queue.put(("summary", None, None, None))
 
     def _poll_gui_queue(self):
-        """Xử lý tối đa 40 update mỗi chu kỳ tránh lag giao diện."""
         count = 0
         try:
             while count < 40:
@@ -653,8 +687,9 @@ class UploadApp:
         total = len(self.rows)
         done = sum(1 for r in self.rows.values() if r.status == STATUS_DONE)
         error = sum(1 for r in self.rows.values() if r.status == STATUS_ERROR)
+        canceled = sum(1 for r in self.rows.values() if r.status == STATUS_CANCELED)
         uploading = sum(1 for r in self.rows.values() if r.status == STATUS_UPLOADING)
-        waiting = total - done - error - uploading
+        waiting = total - done - error - canceled - uploading
 
         self.lbl_summary.config(
             text=(
@@ -662,6 +697,7 @@ class UploadApp:
                 f"Chờ: {waiting}   •   "
                 f"Đang tải: {uploading}   •   "
                 f"Hoàn tất: {done}   •   "
+                f"Hủy: {canceled}   •   "
                 f"Lỗi: {error}"
             )
         )
@@ -669,11 +705,12 @@ class UploadApp:
     def _on_close(self):
         self.is_running = False
 
-        # Đánh thức mọi worker đang kẹt trong wait()
+        for row in self.rows.values():
+            row.cancel_event.set()
+
         with self.concurrency_cond:
             self.concurrency_cond.notify_all()
 
-        # Ngắt lập tức toàn bộ socket đang truyền dữ liệu ở tầng OS
         with self.sock_lock:
             for s in list(self.active_sockets):
                 try:
