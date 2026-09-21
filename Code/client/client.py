@@ -1,213 +1,148 @@
 import os
 import sys
-import time
 import socket
 import struct
+import threading
+import logging
 
-# Nạp config dự phòng nếu file chưa sẵn sàng
-try:
-    import config
-except ImportError:
-    class config:
-        HOST = "127.0.0.1"
-        PORT = 8888
-        BUFFER_SIZE = 64 * 1024
-        DEFAULT_TIMEOUT = 15.0
-        MIN_TRANSFER_SPEED = 100 * 1024  # Tối thiểu 100 KB/s để tính dynamic timeout
+# Cấu hình máy chủ
+HOST = "0.0.0.0"
+PORT = 8888
+BUFFER_SIZE = 64 * 1024
+UPLOAD_DIR = os.path.abspath("uploads")
+HEADER_STRUCT = "!IQ"  # 4 bytes: name_len, 8 bytes: filesize (Big-Endian)
+HEADER_SIZE = struct.calcsize(HEADER_STRUCT)
 
-
-try:
-    from shared import protocol
-except ImportError:
-    class protocol:
-        HEADER_STRUCT = "!IQ"  # 4 bytes: name_len, 8 bytes: filesize (Big-Endian)
-        HEADER_SIZE = struct.calcsize(HEADER_STRUCT)
-
-        @staticmethod
-        def send_file(sock, filepath, buffer_size=64 * 1024):
-            filename_bytes = os.path.basename(filepath).encode("utf-8")
-            filesize = os.path.getsize(filepath)
-
-            # 1. Gửi Header: [4B Độ dài tên][8B Dung lượng][Tên file bytes]
-            header = struct.pack(protocol.HEADER_STRUCT, len(filename_bytes), filesize)
-            sock.sendall(header + filename_bytes)
-
-            # 2. Truyền nội dung file kèm giới hạn chính xác filesize
-            bytes_sent = 0
-            start_time = time.time()
-
-            with open(filepath, "rb") as f:
-                while bytes_sent < filesize:
-                    # Chỉ đọc tối đa số byte còn lại theo header đã gửi
-                    chunk_to_read = min(buffer_size, filesize - bytes_sent)
-                    chunk = f.read(chunk_to_read)
-                    if not chunk:
-                        raise IOError(f"File bị cắt ngắn bất ngờ trong khi gửi: {filepath}")
-
-                    sock.sendall(chunk)
-                    bytes_sent += len(chunk)
-
-                    # Hiển thị progress bar
-                    percent = (bytes_sent / filesize) * 100
-                    elapsed = max(time.time() - start_time, 0.001)
-                    speed_kb = (bytes_sent / 1024) / elapsed
-                    bar_length = 25
-                    filled = int(bar_length * bytes_sent // filesize)
-                    bar = "=" * filled + "-" * (bar_length - filled)
-
-                    sys.stdout.write(
-                        f"\r    [{bar}] {percent:5.1f}% | {bytes_sent / (1024 * 1024):.2f}/{filesize / (1024 * 1024):.2f} MB | {speed_kb:.1f} KB/s"
-                    )
-                    sys.stdout.flush()
-
-            print()  # Xuống dòng sau khi hoàn tất thanh tiến trình
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
-def validate_files(file_list):
-    """Kiểm tra tính hợp lệ, loại trừ trùng lặp và file rỗng/lỗi."""
-    if not file_list:
-        print("[-] Danh sách file trống!")
-        return []
-
-    valid_files = []
-    seen = set()
-
-    for raw_path in file_list:
-        filepath = os.path.abspath(raw_path)
-
-        if filepath in seen:
-            continue
-        seen.add(filepath)
-
-        if not os.path.exists(filepath):
-            print(f"[-] Bỏ qua (không tồn tại): {raw_path}")
-        elif not os.path.isfile(filepath):
-            print(f"[-] Bỏ qua (không phải file): {raw_path}")
-        elif not os.access(filepath, os.R_OK):
-            print(f"[-] Bỏ qua (không có quyền đọc): {raw_path}")
-        else:
-            try:
-                size = os.path.getsize(filepath)
-                if size == 0:
-                    print(f"[-] Bỏ qua (file rỗng 0 bytes): {raw_path}")
-                else:
-                    valid_files.append(filepath)
-            except OSError as e:
-                print(f"[-] Bỏ qua (lỗi metadata): {raw_path} ({e})")
-
-    return valid_files
-
-
-def _recv_response_line(sock, max_bytes=1024):
-    """Đọc dữ liệu đến ký tự newline '\\n' để đảm bảo không bị dính byte ACK."""
-    buffer = bytearray()
-    while len(buffer) < max_bytes:
-        chunk = sock.recv(1)
+def _recv_exact(sock, num_bytes):
+    """
+    Đọc chính xác num_bytes từ socket.
+    Giải quyết triệt để vấn đề phân mảnh byte (packet fragmentation) của TCP.
+    """
+    buf = bytearray()
+    while len(buf) < num_bytes:
+        chunk = sock.recv(num_bytes - len(buf))
         if not chunk:
-            return None
-        if chunk == b"\n":
-            break
-        buffer.extend(chunk)
-    return buffer.decode("utf-8", errors="replace").strip()
+            return None  # Kết nối bị đóng sớm (EOF)
+        buf.extend(chunk)
+    return bytes(buf)
 
 
-def calculate_timeout(filesize, base_timeout, min_speed):
-    """Tính toán thời gian timeout co giãn linh hoạt theo kích thước file."""
-    estimated_time = filesize / min_speed
-    return max(base_timeout, base_timeout + estimated_time)
+def _get_unique_filepath(target_dir, filename):
+    """Tạo tên file duy nhất trong thư mục nếu file đã tồn tại."""
+    base_name, ext = os.path.splitext(filename)
+    counter = 1
+    dest_path = os.path.join(target_dir, filename)
+
+    while os.path.exists(dest_path):
+        dest_path = os.path.join(target_dir, f"{base_name}_{counter}{ext}")
+        counter += 1
+
+    return dest_path
 
 
-def start_client(file_list):
-    """Quản lý kết nối TCP và gửi tuần tự danh sách file lên Server."""
-    valid_files = validate_files(file_list)
-    if not valid_files:
-        print("[-] Không có file hợp lệ nào để gửi!")
-        return
-
-    host = getattr(config, "HOST", "127.0.0.1")
-    port = getattr(config, "PORT", 8888)
-    buffer_size = getattr(config, "BUFFER_SIZE", 64 * 1024)
-    default_timeout = getattr(config, "DEFAULT_TIMEOUT", 15.0)
-    min_speed = getattr(config, "MIN_TRANSFER_SPEED", 100 * 1024)
-
-    total = len(valid_files)
-    success_count = 0
-    client = None
+def handle_client(client_sock, client_addr):
+    """Xử lý phiên làm việc nhận nhiều file từ một kết nối client."""
+    logging.info(f"Kết nối mới từ {client_addr[0]}:{client_addr[1]}")
 
     try:
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.settimeout(default_timeout)
-
-        print(f"[*] Đang kết nối tới Server {host}:{port}...")
-        client.connect((host, port))
-        print("[+] Kết nối Server thành công!\n")
-
-        for index, filepath in enumerate(valid_files, start=1):
-            fname = os.path.basename(filepath)
-            try:
-                fsize = os.path.getsize(filepath)
-            except OSError:
-                print(f"[-] Bỏ qua ({fname}): File đã bị xóa hoặc mất quyền truy cập.")
-                continue
-
-            # Cài đặt timeout động tương ứng với độ lớn file
-            file_timeout = calculate_timeout(fsize, default_timeout, min_speed)
-            client.settimeout(file_timeout)
-
-            print(f"[{index}/{total}] Đang gửi: {fname} ({fsize / 1024:.2f} KB)...")
-
-            # 1. Gửi file
-            try:
-                protocol.send_file(client, filepath, buffer_size)
-            except (BrokenPipeError, ConnectionResetError):
-                print(f"[-] Lỗi: Mất kết nối tới Server khi đang truyền {fname}.")
-                break
-            except Exception as send_err:
-                print(f"[-] Lỗi gửi file {fname}: {send_err}")
-                continue
-
-            # 2. Chờ phản hồi kết thúc bằng '\n' từ Server
-            try:
-                ack = _recv_response_line(client)
-            except socket.timeout:
-                print(f"[-] Timeout: Quá thời gian chờ phản hồi ({file_timeout:.1f}s) cho: {fname}")
+        while True:
+            # 1. Đọc Header cố định (12 bytes)
+            raw_header = _recv_exact(client_sock, HEADER_SIZE)
+            if not raw_header:
+                # Client đã gửi hết file và chủ động ngắt kết nối bình thường
+                logging.info(f"Client {client_addr} đã ngắt kết nối an toàn.")
                 break
 
-            if ack is None:
-                print(f"[-] Server đã ngắt kết nối đột ngột khi xử lý: {fname}")
+            name_len, filesize = struct.unpack(HEADER_STRUCT, raw_header)
+
+            # 2. Đọc Tên file theo độ dài name_len
+            raw_filename = _recv_exact(client_sock, name_len)
+            if not raw_filename:
+                logging.warning(f"Mất kết nối khi đang đọc tên file từ {client_addr}")
                 break
 
-            ack_upper = ack.upper()
-            if ack_upper == "ACK" or "OK" in ack_upper:
-                print(f"[+] Server xác nhận thành công: {fname}\n")
-                success_count += 1
+            filename = raw_filename.decode("utf-8", errors="replace")
+            # Bảo mật: chống lỗ hổng Path Traversal (e.g., ../../etc/passwd)
+            clean_filename = os.path.basename(filename)
+
+            save_path = _get_unique_filepath(UPLOAD_DIR, clean_filename)
+            logging.info(f"Đang nhận: '{clean_filename}' ({filesize / 1024:.2f} KB) -> '{os.path.basename(save_path)}'")
+
+            # 3. Đọc dữ liệu nội dung file theo kích thước filesize
+            bytes_received = 0
+            transfer_failed = False
+
+            with open(save_path, "wb") as f:
+                while bytes_received < filesize:
+                    chunk_limit = min(BUFFER_SIZE, filesize - bytes_received)
+                    chunk = client_sock.recv(chunk_limit)
+                    if not chunk:
+                        transfer_failed = True
+                        break
+
+                    f.write(chunk)
+                    bytes_received += len(chunk)
+
+            # 4. Kiểm tra và gửi phản hồi cho Client
+            if transfer_failed or bytes_received < filesize:
+                logging.error(f"Lỗi: Nhận thiếu dữ liệu file '{clean_filename}'. Đã xóa file hỏng.")
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                client_sock.sendall(b"ERROR: Truyen du lieu bi gian doan\n")
+                break
             else:
-                print(f"[?] Phản hồi thất bại/lạ từ Server ({fname}): {ack}\n")
+                logging.info(f"Đã lưu thành công: '{os.path.basename(save_path)}'")
+                client_sock.sendall(b"ACK\n")
 
-    except socket.timeout:
-        print("[-] Lỗi: Timeout khi khởi tạo kết nối socket!")
-    except ConnectionRefusedError:
-        print(f"[-] Lỗi: Không thể kết nối tới {host}:{port}. Server chưa chạy hoặc sai cổng.")
     except ConnectionResetError:
-        print("[-] Lỗi: Server chủ động Reset kết nối.")
-    except KeyboardInterrupt:
-        print("\n[!] Đã hủy tác vụ theo yêu cầu người dùng.")
+        logging.warning(f"Client {client_addr} đột ngột reset kết nối.")
     except Exception as e:
-        print(f"[-] Có lỗi ngoài dự kiến: {e}")
+        logging.error(f"Lỗi ngoài dự kiến khi phục vụ {client_addr}: {e}")
     finally:
-        if client:
-            try:
-                client.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            client.close()
-            print("[*] Socket đã được đóng an toàn.")
+        try:
+            client_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        client_sock.close()
 
-        print("-------------------------------------------")
-        print(f"[+] Tổng kết: {success_count}/{total} file đã gửi thành công.")
-        print("-------------------------------------------")
+
+def start_server():
+    """Khởi động máy chủ TCP và lắng nghe kết nối."""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Tái sử dụng địa chỉ cổng tránh lỗi "Address already in use" khi restart
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        server_sock.bind((HOST, PORT))
+        server_sock.listen(128)
+        logging.info(f"Server đang chạy tại {HOST}:{PORT}")
+        logging.info(f"Thư mục lưu trữ: {UPLOAD_DIR}")
+        logging.info("Sẵn sàng nhận file từ Client...\n")
+
+        while True:
+            client_sock, client_addr = server_sock.accept()
+            worker = threading.Thread(
+                target=handle_client,
+                args=(client_sock, client_addr),
+                daemon=True,
+            )
+            worker.start()
+
+    except KeyboardInterrupt:
+        logging.info("\nĐang tắt Server theo yêu cầu người dùng...")
+    finally:
+        server_sock.close()
+        logging.info("Server đã đóng socket thành công.")
 
 
 if __name__ == "__main__":
-    files_to_send = sys.argv[1:] if len(sys.argv) > 1 else ["test.txt", "data.zip"]
-    start_client(files_to_send)
+    start_server()
