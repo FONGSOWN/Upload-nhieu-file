@@ -38,7 +38,7 @@ except ImportError:
             filename_bytes = os.path.basename(filepath).encode("utf-8")
             filesize = os.path.getsize(filepath)
 
-            # 1. Đóng gói và gửi metadata header
+            # 1. Đóng gói và gửi metadata header + tên file
             meta = struct.pack(protocol.HEADER_STRUCT, len(filename_bytes), filesize)
             sock.sendall(meta + filename_bytes)
 
@@ -121,13 +121,14 @@ def format_size(num_bytes):
 
 class FileRow:
     """Widget quản lý hiển thị 1 hàng file trong danh sách giao diện."""
-    def __init__(self, parent, filepath, index, style):
+    def __init__(self, parent, app, filepath, index, style):
+        self.app = app
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
         self.status = STATUS_WAIT
         self.style = style
         self.cancel_event = threading.Event()
-        self.active_socket = None  # Tham chiếu để đóng socket lập tức khi hủy
+        self.active_socket = None
 
         bg = COL_CARD if index % 2 == 0 else COL_CARD_ALT
 
@@ -137,11 +138,11 @@ class FileRow:
         self.frame = tk.Frame(self.outer, bg=bg, padx=12, pady=8)
         self.frame.pack(fill="x", expand=True, padx=0, pady=(0, 1))
 
-        self.frame.columnconfigure(0, weight=3, minsize=200)
-        self.frame.columnconfigure(1, weight=3, minsize=160)
-        self.frame.columnconfigure(2, weight=1, minsize=90)
-        self.frame.columnconfigure(3, weight=2, minsize=130)
-        self.frame.columnconfigure(4, weight=0, minsize=36)
+        self.frame.columnconfigure(0, weight=3, minsize=190)
+        self.frame.columnconfigure(1, weight=3, minsize=150)
+        self.frame.columnconfigure(2, weight=1, minsize=80)
+        self.frame.columnconfigure(3, weight=2, minsize=120)
+        self.frame.columnconfigure(4, weight=0, minsize=65)  # Chứa các nút thao tác
 
         try:
             size_txt = format_size(os.path.getsize(filepath))
@@ -151,7 +152,7 @@ class FileRow:
         name_box = tk.Frame(self.frame, bg=bg)
         name_box.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
-        display_name = self.filename if len(self.filename) <= 28 else self.filename[:25] + "..."
+        display_name = self.filename if len(self.filename) <= 26 else self.filename[:23] + "..."
         tk.Label(
             name_box,
             text=f"📄 {display_name}",
@@ -208,8 +209,13 @@ class FileRow:
         )
         self.lbl_info.grid(row=0, column=3, sticky="ew", padx=(10, 0))
 
+        # Cụm nút hành động bên phải
+        self.action_box = tk.Frame(self.frame, bg=bg)
+        self.action_box.grid(row=0, column=4, sticky="e")
+
+        # Nút Hủy (✕)
         self.btn_cancel = tk.Button(
-            self.frame,
+            self.action_box,
             text="✕",
             font=("Segoe UI", 9, "bold"),
             fg="#9ca3af",
@@ -220,10 +226,38 @@ class FileRow:
             cursor="hand2",
             command=self.cancel,
         )
-        self.btn_cancel.grid(row=0, column=4, padx=(4, 0))
+        self.btn_cancel.pack(side="left", padx=2)
+
+        # Nút Thử lại (↺) - Ẩn mặc định
+        self.btn_retry = tk.Button(
+            self.action_box,
+            text="↺",
+            font=("Segoe UI", 10, "bold"),
+            fg="#2563eb",
+            bg=bg,
+            activeforeground="#1d4ed8",
+            activebackground=bg,
+            bd=0,
+            cursor="hand2",
+            command=self.retry,
+        )
+
+        # Nút Xóa hàng (🗑) - Ẩn mặc định
+        self.btn_delete = tk.Button(
+            self.action_box,
+            text="🗑",
+            font=("Segoe UI", 9),
+            fg="#9ca3af",
+            bg=bg,
+            activeforeground="#ef4444",
+            activebackground=bg,
+            bd=0,
+            cursor="hand2",
+            command=self.delete_row,
+        )
 
     def cancel(self):
-        """Hủy tác vụ và ép đóng socket ngay lập tức."""
+        """Hủy tác vụ và ngắt kết nối socket lập tức."""
         if self.status in (STATUS_WAIT, STATUS_UPLOADING):
             self.cancel_event.set()
             if self.active_socket:
@@ -233,6 +267,22 @@ class FileRow:
                     pass
                 self.active_socket.close()
             self.set_status(STATUS_CANCELED, "Đã hủy")
+
+    def retry(self):
+        """Reset trạng thái và đưa file trở lại hàng đợi tải lên."""
+        if self.status in (STATUS_ERROR, STATUS_CANCELED):
+            self.cancel_event.clear()
+            self.active_socket = None
+            self.set_progress(0, "")
+            self.set_status(STATUS_WAIT, "Sẵn sàng thử lại")
+            self.app.task_queue.put((self.filepath, self))
+            self.app._update_summary()
+
+    def delete_row(self):
+        """Hủy kết nối (nếu đang chạy) và xóa hẳn hàng file khỏi giao diện."""
+        self.cancel()
+        self.outer.destroy()
+        self.app.remove_row(self.filepath)
 
     def set_progress(self, percent, info_text=None):
         self.progress["value"] = max(0.0, min(100.0, percent))
@@ -247,15 +297,26 @@ class FileRow:
         if info_text is not None:
             self.lbl_info.config(text=info_text)
 
-        if status in (STATUS_DONE, STATUS_ERROR, STATUS_CANCELED):
-            self.btn_cancel.grid_remove()
+        # Điều khiển ẩn/hiện nút bấm tùy theo trạng thái
+        if status in (STATUS_WAIT, STATUS_UPLOADING):
+            self.btn_cancel.pack(side="left", padx=2)
+            self.btn_retry.pack_forget()
+            self.btn_delete.pack_forget()
+        elif status in (STATUS_ERROR, STATUS_CANCELED):
+            self.btn_cancel.pack_forget()
+            self.btn_retry.pack(side="left", padx=2)
+            self.btn_delete.pack(side="left", padx=2)
+        elif status == STATUS_DONE:
+            self.btn_cancel.pack_forget()
+            self.btn_retry.pack_forget()
+            self.btn_delete.pack(side="left", padx=2)
 
 
 class UploadApp:
     def __init__(self, root):
         self.root = root
         self.root.title("UDM_10 - Upload nhiều file đồng thời")
-        self.root.geometry("960x640")
+        self.root.geometry("980x640")
         self.root.minsize(760, 480)
         self.root.configure(bg=COL_BG)
 
@@ -350,7 +411,7 @@ class UploadApp:
 
         tk.Label(
             header_bar,
-            text="Binary TLV Protocol | Instant Cancel",
+            text="Binary TLV Protocol | Instant Cancel & Retry",
             bg=COL_PRIMARY,
             fg="#c7d2fe",
             font=("Segoe UI", 9),
@@ -458,7 +519,7 @@ class UploadApp:
             ("TIẾN TRÌNH", 3),
             ("TRẠNG THÁI", 1),
             ("TỐC ĐỘ / THỜI GIAN", 2),
-            ("", 0),
+            ("THAO TÁC", 0),
         ]
 
         for i, (text, weight) in enumerate(headers):
@@ -563,11 +624,12 @@ class UploadApp:
             if filepath in self.rows:
                 continue
 
-            if self.row_count == 0:
+            if len(self.rows) == 0:
                 self.empty_label.pack_forget()
 
             row = FileRow(
                 self.list_frame,
+                self,
                 filepath,
                 self.row_count,
                 self.style,
@@ -580,6 +642,14 @@ class UploadApp:
             self.task_queue.put((filepath, row))
 
         if added:
+            self._update_summary()
+
+    def remove_row(self, filepath):
+        """Xóa hẳn hàng file khỏi danh sách theo dõi."""
+        if filepath in self.rows:
+            del self.rows[filepath]
+            if len(self.rows) == 0:
+                self.empty_label.pack(fill="x")
             self._update_summary()
 
     def _do_upload(self, filepath, row):
@@ -608,7 +678,7 @@ class UploadApp:
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(calc_timeout)
-            row.active_socket = sock  # Gán socket để row.cancel() có thể can thiệp ngay
+            row.active_socket = sock
 
             with self.sock_lock:
                 if not self.is_running or row.cancel_event.is_set():
@@ -696,7 +766,7 @@ class UploadApp:
         error = sum(1 for r in self.rows.values() if r.status == STATUS_ERROR)
         canceled = sum(1 for r in self.rows.values() if r.status == STATUS_CANCELED)
         uploading = sum(1 for r in self.rows.values() if r.status == STATUS_UPLOADING)
-        waiting = total - done - error - canceled - uploading
+        waiting = sum(1 for r in self.rows.values() if r.status == STATUS_WAIT)
 
         self.lbl_summary.config(
             text=(
@@ -712,7 +782,7 @@ class UploadApp:
     def _on_close(self):
         self.is_running = False
 
-        for row in self.rows.values():
+        for row in list(self.rows.values()):
             row.cancel()
 
         with self.concurrency_cond:
