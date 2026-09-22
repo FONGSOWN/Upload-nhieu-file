@@ -4,113 +4,118 @@ import socket
 import struct
 import sys
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8888
 BUFFER_SIZE = 64 * 1024
 HEADER_STRUCT = "!IQ"  # 4 bytes: name_len, 8 bytes: filesize (Big-Endian)
+HEADER_SIZE = struct.calcsize(HEADER_STRUCT)  # 12 bytes
 
 
-def send_file(sock: socket.socket, filepath: str) -> bool:
-    """Đóng gói và gửi một file đến Server theo đúng cấu trúc Header."""
-    if not os.path.isfile(filepath):
-        print(f"[-] File không tồn tại hoặc không hợp lệ: {filepath}")
-        return False
+def recv_exact(sock: socket.socket, num_bytes: int) -> bytes | None:
+    """Đọc chính xác num_bytes từ TCP socket. Trả về None nếu client đóng kết nối."""
+    buffer = bytearray()
+    while len(buffer) < num_bytes:
+        chunk = sock.recv(min(num_bytes - len(buffer), BUFFER_SIZE))
+        if not chunk:
+            return None
+        buffer.extend(chunk)
+    return bytes(buffer)
 
-    filename = os.path.basename(filepath)
-    filename_bytes = filename.encode("utf-8")
-    name_len = len(filename_bytes)
-    filesize = os.path.getsize(filepath)
 
-    print(f"\n[*] Đang gửi: '{filename}' ({filesize / 1024:.2f} KB)")
+def handle_client(sock: socket.socket, addr: tuple[str, int], upload_dir: str):
+    """Xử lý nhận nhiều file tuần tự từ một Client."""
+    print(f"[+] Kết nối từ: {addr[0]}:{addr[1]}")
+    file_count = 0
 
     try:
-        # 1. Gửi Header nhị phân kèm Tên file trong 1 lượt gửi duy nhất
-        header = struct.pack(HEADER_STRUCT, name_len, filesize)
-        sock.sendall(header + filename_bytes)
+        while True:
+            # 1. Đọc Header kích thước cố định (12 bytes)
+            header_bytes = recv_exact(sock, HEADER_SIZE)
+            if header_bytes is None:
+                # Client đã ngắt kết nối an toàn sau khi gửi hết file
+                break
 
-        # 2. Gửi nội dung dữ liệu file theo từng chunk
-        sent_bytes = 0
-        with open(filepath, "rb") as f:
-            while chunk := f.read(BUFFER_SIZE):
-                sock.sendall(chunk)
-                sent_bytes += len(chunk)
+            name_len, filesize = struct.unpack(HEADER_STRUCT, header_bytes)
 
-                # Hiển thị tiến trình gửi
-                percent = (sent_bytes / filesize) * 100 if filesize > 0 else 100
-                sys.stdout.write(f"\r    Tiến trình: {percent:.1f}% ({sent_bytes}/{filesize} bytes)")
-                sys.stdout.flush()
+            # 2. Đọc chính xác Tên file
+            filename_raw = recv_exact(sock, name_len)
+            if filename_raw is None:
+                print("[-] Mất kết nối khi đang nhận tên file.")
+                break
 
-        print()
+            filename = os.path.basename(filename_raw.decode("utf-8", errors="replace"))
+            save_path = os.path.join(upload_dir, filename)
 
-        # 3. Chờ phản hồi xác nhận từ Server (ACK\n hoặc ERROR)
-        response = sock.recv(1024).decode("utf-8", errors="replace")
-        if response.startswith("ACK") or response.startswith("OK"):
-            print(f"[+] '{filename}' đã tải lên thành công!")
-            return True
-        else:
-            print(f"[-] Server báo lỗi: {response.strip()}")
-            return False
+            # Tránh ghi đè file trùng tên
+            base, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(save_path):
+                save_path = os.path.join(upload_dir, f"{base}_{counter}{ext}")
+                counter += 1
 
+            print(f"\n[*] Đang nhận: '{os.path.basename(save_path)}' ({filesize / 1024:.2f} KB)")
+
+            # 3. Đọc dữ liệu nội dung file theo kích thước filesize
+            bytes_received = 0
+            with open(save_path, "wb") as f:
+                while bytes_received < filesize:
+                    to_read = min(BUFFER_SIZE, filesize - bytes_received)
+                    chunk = sock.recv(to_read)
+                    if not chunk:
+                        raise ConnectionError("Kết nối bị ngắt đột ngột khi đang nhận file.")
+                    f.write(chunk)
+                    bytes_received += len(chunk)
+
+                    # Hiển thị tiến trình
+                    percent = (bytes_received / filesize) * 100 if filesize > 0 else 100
+                    sys.stdout.write(f"\r    Tiến trình: {percent:.1f}% ({bytes_received}/{filesize} bytes)")
+                    sys.stdout.flush()
+
+            print()
+            # 4. Gửi phản hồi xác nhận ACK về cho Client
+            sock.sendall(b"ACK\n")
+            print(f"[+] Lưu thành công: '{save_path}'")
+            file_count += 1
+
+    except ConnectionResetError:
+        print(f"[-] Client {addr} ngắt kết nối đột ngột.")
     except Exception as e:
-        print(f"[-] Lỗi truyền file: {e}")
-        return False
-
-
-def collect_all_files(paths: list[str]) -> list[str]:
-    """Quét và gom toàn bộ file hợp lệ (hỗ trợ cả đường dẫn thư mục)."""
-    collected = []
-    for path in paths:
-        if os.path.isfile(path):
-            collected.append(os.path.abspath(path))
-        elif os.path.isdir(path):
-            for root, _, files in os.walk(path):
-                for f in files:
-                    collected.append(os.path.abspath(os.path.join(root, f)))
-        else:
-            print(f"[!] Bỏ qua đường dẫn không tồn tại: {path}")
-    return list(dict.fromkeys(collected))  # Khử trùng lặp file
+        print(f"[-] Lỗi trong quá trình nhận file: {e}")
+        try:
+            sock.sendall(f"ERROR: {e}\n".encode("utf-8"))
+        except OSError:
+            pass
+    finally:
+        sock.close()
+        print(f"[*] Đóng kết nối với {addr[0]}:{addr[1]} (Đã nhận {file_count} file).\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TCP File Upload Client (CLI)")
-    parser.add_argument("paths", nargs="+", help="Đường dẫn tới file hoặc thư mục cần upload")
-    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Địa chỉ IP của Server (mặc định: {DEFAULT_HOST})")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Cổng kết nối (mặc định: {DEFAULT_PORT})")
+    parser = argparse.ArgumentParser(description="TCP File Upload Server (CLI)")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Địa chỉ IP lắng nghe (mặc định: {DEFAULT_HOST})")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Cổng lắng nghe (mặc định: {DEFAULT_PORT})")
+    parser.add_argument("--dest", default="./uploads", help="Thư mục lưu trữ file tải lên (mặc định: ./uploads)")
     args = parser.parse_args()
 
-    files_to_send = collect_all_files(args.paths)
-    if not files_to_send:
-        print("[-] Không tìm thấy file hợp lệ nào để gửi.")
-        return
+    os.makedirs(args.dest, exist_ok=True)
 
-    print(f"[*] Tìm thấy {len(files_to_send)} file cần truyền.")
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.connect((args.host, args.port))
-        print(f"[+] Đã kết nối đến {args.host}:{args.port}")
+        server_sock.bind((args.host, args.port))
+        server_sock.listen(5)
+        print(f"[*] Server đang lắng nghe tại {args.host}:{args.port}")
+        print(f"[*] Thư mục lưu trữ: {os.path.abspath(args.dest)}")
 
-        success_count = 0
-        for filepath in files_to_send:
-            if send_file(sock, filepath):
-                success_count += 1
-            else:
-                print("[-] Dừng truyền do xảy ra lỗi.")
-                break
+        while True:
+            client_sock, client_addr = server_sock.accept()
+            handle_client(client_sock, client_addr, args.dest)
 
-        print(f"\n[=] Hoàn tất phiên gửi: {success_count}/{len(files_to_send)} file thành công.")
-
-    except ConnectionRefusedError:
-        print(f"[-] Không thể kết nối tới {args.host}:{args.port}. Kiểm tra xem Server đã chạy chưa.")
-    except Exception as e:
-        print(f"[-] Lỗi socket: {e}")
+    except KeyboardInterrupt:
+        print("\n[*] Đang tắt Server...")
     finally:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        sock.close()
-        print("[*] Đã đóng kết nối Client an toàn.")
+        server_sock.close()
 
 
 if __name__ == "__main__":
